@@ -117,30 +117,38 @@ function processBills() {
       Logger.log('Reading receipt: ' + fileName);
 
       try {
-        var bill = extractBillWithGemini(file, mimeType);
-        if (!bill) {
+        var bills = extractBillsWithGemini(file, mimeType);
+        if (!bills || bills.length === 0) {
           errors.push('Could not read: ' + fileName);
           continue;
         }
 
-        Logger.log('Extracted: ' + JSON.stringify(bill));
+        Logger.log('Extracted ' + bills.length + ' receipt(s) from: ' + fileName);
 
-        var tabName = getMonthTab(bill.date);
-        if (!tabName) {
-          errors.push('No valid date in: ' + fileName);
-          continue;
+        var fileWritten = false;
+        for (var b = 0; b < bills.length; b++) {
+          var bill = bills[b];
+          var tabName = getMonthTab(bill.date);
+          if (!tabName) {
+            errors.push('No valid date in page ' + (b + 1) + ' of: ' + fileName);
+            continue;
+          }
+
+          var tab = findOrCreateTab(ss, tabName);
+          var isCard = (bill.payment_method === 'card' || bill.payment_method === 'upi');
+          var written = appendBillRow(tab, bill, isCard, null);
+
+          if (written) {
+            addedCount++;
+            fileWritten = true;
+          } else {
+            errors.push('Section full for page ' + (b + 1) + ' of: ' + fileName);
+          }
         }
 
-        var tab = findOrCreateTab(ss, tabName);
-        var isCard = (bill.payment_method === 'card' || bill.payment_method === 'upi');
-        var written = appendBillRow(tab, bill, isCard, null);
-
-        if (written) {
-          markProcessed(ss, fileId, fileName, bill.date, 'drive');
+        if (fileWritten) {
+          markProcessed(ss, fileId, fileName, bills[0].date, 'drive');
           processed[fileId] = true;
-          addedCount++;
-        } else {
-          errors.push('Section full for: ' + fileName);
         }
       } catch (e) {
         errors.push('Error on ' + fileName + ': ' + e.message);
@@ -189,13 +197,14 @@ function processBills() {
 // ── TEST FUNCTION — run this from Apps Script to check API key ──
 function testGeminiKey() {
   var url = 'https://generativelanguage.googleapis.com/v1beta/models/' +
-            GEMINI_MODEL + ':generateContent?key=' + GEMINI_API_KEY;
+            GEMINI_MODEL + ':generateContent';
   var payload = {
     contents: [{ parts: [{ text: 'Reply with just the word: OK' }] }]
   };
   var response = UrlFetchApp.fetch(url, {
     method: 'post',
     contentType: 'application/json',
+    headers: { 'x-goog-api-key': GEMINI_API_KEY },
     payload: JSON.stringify(payload),
     muteHttpExceptions: true
   });
@@ -203,25 +212,33 @@ function testGeminiKey() {
 }
 
 // ── GEMINI PDF EXTRACTION ────────────────────────────────────
-function extractBillWithGemini(file, mimeType) {
+// Returns an ARRAY of bill objects (one per receipt/page).
+// Works for both single-page and multi-page PDFs/images.
+function extractBillsWithGemini(file, mimeType) {
   var fileBytes = file.getBlob().getBytes();
   var b64 = Utilities.base64Encode(fileBytes);
 
-  var prompt = 'You are reading a receipt or bill. Extract the following fields.\n\n' +
-    'Return ONLY valid JSON, no markdown, no extra text:\n' +
-    '{\n' +
-    '  "date": "YYYY-MM-DD or null if not found",\n' +
-    '  "description": "Short merchant name only, max 4 words",\n' +
-    '  "receipt_nr": "The bill/invoice/receipt number printed on the document. Look for labels like: Bill No, Bill Number, Invoice No, Invoice Number, Receipt No, Receipt Number, Token No, Coupon No, Order No, Bill #. Extract the alphanumeric code next to these labels. Return null only if no such number exists.",\n' +
-    '  "amount": "Total amount paid as a number (no currency symbol), or null",\n' +
-    '  "payment_method": "card or upi or cash or unknown"\n' +
-    '}\n\n' +
+  var prompt =
+    'You are reading a receipt/bill document. It may have ONE receipt or MULTIPLE receipts across pages.\n\n' +
+    'Process EVERY page. For each receipt found, extract the fields below.\n' +
+    'Return ONLY a valid JSON array — one object per receipt, no markdown, no extra text:\n' +
+    '[\n' +
+    '  {\n' +
+    '    "date": "YYYY-MM-DD or null",\n' +
+    '    "description": "Short merchant name only, max 4 words",\n' +
+    '    "receipt_nr": "The bill/invoice/receipt number. Look for: Bill No, Bill Number, Invoice No, Invoice Number, Receipt No, Receipt Number, Token No, Coupon No, Order No, Bill #. Extract the alphanumeric code next to these labels. Return null only if truly absent.",\n' +
+    '    "amount": "Grand total paid as a number only (no currency symbol), or null",\n' +
+    '    "payment_method": "card or upi or cash or unknown"\n' +
+    '  }\n' +
+    ']\n\n' +
     'Rules:\n' +
-    '- date: use the date printed on the receipt\n' +
+    '- Return one object per receipt — if 9 pages with 9 receipts, return 9 objects\n' +
+    '- date: date printed on that receipt\n' +
     '- description: merchant/store name only, short\n' +
-    '- receipt_nr: bill/receipt/invoice number on the document, null if absent\n' +
-    '- amount: the grand total paid\n' +
-    '- payment_method: look for CARD, UPI, CASH, GPay, PhonePe, Credit, Debit, Online. UPI = card.';
+    '- receipt_nr: bill/receipt/invoice number on that receipt, null only if truly absent\n' +
+    '- amount: grand total paid on that receipt\n' +
+    '- payment_method: CARD/Credit/Debit = card, UPI/GPay/PhonePe/Paytm = upi, CASH = cash\n' +
+    '- Return [] if no readable receipts found';
 
   var payload = {
     contents: [{
@@ -234,11 +251,12 @@ function extractBillWithGemini(file, mimeType) {
   };
 
   var url = 'https://generativelanguage.googleapis.com/v1beta/models/' +
-            GEMINI_MODEL + ':generateContent?key=' + GEMINI_API_KEY;
+            GEMINI_MODEL + ':generateContent';
 
   var options = {
     method: 'post',
     contentType: 'application/json',
+    headers: { 'x-goog-api-key': GEMINI_API_KEY },
     payload: JSON.stringify(payload),
     muteHttpExceptions: true
   };
@@ -247,19 +265,23 @@ function extractBillWithGemini(file, mimeType) {
   var json = JSON.parse(response.getContentText());
 
   if (!json.candidates || !json.candidates[0]) {
-    Logger.log('Gemini returned no candidates: ' + response.getContentText().slice(0, 300));
-    return null;
+    var rawResp = response.getContentText().slice(0, 500);
+    Logger.log('Gemini returned no candidates: ' + rawResp);
+    // Surface the error so processBills can include it in warnings
+    throw new Error('Gemini no candidates: ' + rawResp);
   }
 
   var text = json.candidates[0].content.parts[0].text.trim();
-  // Strip markdown fences
   text = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
 
   try {
-    return JSON.parse(text);
+    var parsed = JSON.parse(text);
+    // If Gemini returned a single object instead of array, wrap it
+    if (parsed && !Array.isArray(parsed)) return [parsed];
+    return Array.isArray(parsed) ? parsed : [];
   } catch (e) {
-    Logger.log('Gemini parse error: ' + text.slice(0, 200));
-    return null;
+    Logger.log('Gemini parse error. Raw text: ' + text.slice(0, 400));
+    throw new Error('Gemini parse error: ' + text.slice(0, 200));
   }
 }
 
@@ -540,51 +562,48 @@ function fixMissingReceiptNumbers() {
       if (!isSupportedFile(mimeType, fileName)) continue;
 
       try {
-        var bill = extractBillWithGemini(file, mimeType);
-        Logger.log(fileName + ' → receipt_nr: ' + (bill ? bill.receipt_nr : 'null'));
+        var bills = extractBillsWithGemini(file, mimeType);
+        if (!bills || bills.length === 0) { skipped++; continue; }
 
-        if (!bill || !bill.receipt_nr || !bill.date) {
-          skipped++;
-          continue;
-        }
+        for (var b = 0; b < bills.length; b++) {
+          var bill = bills[b];
+          Logger.log(fileName + ' page ' + (b+1) + ' → receipt_nr: ' + (bill ? bill.receipt_nr : 'null'));
 
-        // Only care about bills that belong to the active month tab
-        if (getMonthTab(bill.date) !== tabName) continue;
+          if (!bill || !bill.receipt_nr || !bill.date) { skipped++; continue; }
+          if (getMonthTab(bill.date) !== tabName) continue;
 
-        var dateFormatted = formatDate(bill.date);
-        var billAmount = parseFloat(bill.amount) || 0;
+          var dateFormatted = formatDate(bill.date);
+          var billAmount = parseFloat(bill.amount) || 0;
 
-        // Search both card and cash sections for a row with same date + amount + empty receipt_nr
-        var sections = [
-          { start: CARD_START_ROW, end: CARD_END_ROW },
-          { start: CASH_START_ROW, end: CASH_END_ROW }
-        ];
+          var sections = [
+            { start: CARD_START_ROW, end: CARD_END_ROW },
+            { start: CASH_START_ROW, end: CASH_END_ROW }
+          ];
 
-        var filled = false;
-        for (var s = 0; s < sections.length && !filled; s++) {
-          var startRow = sections[s].start;
-          var endRow   = sections[s].end;
-          // Read B:L (columns B through L = 11 columns, indices 0-10)
-          var rangeData = tab.getRange('B' + startRow + ':L' + endRow).getValues();
+          var filled = false;
+          for (var s = 0; s < sections.length && !filled; s++) {
+            var startRow = sections[s].start;
+            var endRow   = sections[s].end;
+            var rangeData = tab.getRange('B' + startRow + ':L' + endRow).getValues();
 
-          for (var i = 0; i < rangeData.length; i++) {
-            var rowDate      = (rangeData[i][0] || '').toString().trim();    // B
-            var rowReceiptNr = (rangeData[i][6] || '').toString().trim();    // H = B+6
-            var rowAmount    = parseFloat(rangeData[i][10]) || 0;            // L = B+10
+            for (var i = 0; i < rangeData.length; i++) {
+              var rowDate      = (rangeData[i][0] || '').toString().trim();
+              var rowReceiptNr = (rangeData[i][6] || '').toString().trim();
+              var rowAmount    = parseFloat(rangeData[i][10]) || 0;
 
-            if (rowDate === dateFormatted &&
-                Math.abs(rowAmount - billAmount) < 0.01 &&
-                rowReceiptNr === '') {
-              tab.getRange('H' + (startRow + i)).setValue(bill.receipt_nr);
-              Logger.log('Filled H' + (startRow + i) + ' = ' + bill.receipt_nr + ' (' + fileName + ')');
-              fixedCount++;
-              filled = true;
-              break;
+              if (rowDate === dateFormatted &&
+                  Math.abs(rowAmount - billAmount) < 0.01 &&
+                  rowReceiptNr === '') {
+                tab.getRange('H' + (startRow + i)).setValue(bill.receipt_nr);
+                Logger.log('Filled H' + (startRow + i) + ' = ' + bill.receipt_nr);
+                fixedCount++;
+                filled = true;
+                break;
+              }
             }
           }
+          if (!filled) skipped++;
         }
-
-        if (!filled) skipped++;
       } catch (e) {
         errors.push('Error on ' + fileName + ': ' + e.message);
       }
