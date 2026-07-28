@@ -93,36 +93,48 @@ async function getOrCreateStatusSheet(auth, employee) {
     return employee.statusSheetId;
   }
 
-  // Create new spreadsheet
-  const spreadsheet = await apiWithRetry(() => sheets.spreadsheets.create({
-    requestBody: {
-      properties: { title: `Onboarding Status — ${employee.name} (${employee.employeeId})` },
-      sheets: [{ properties: { title: 'Status' } }],
-    },
-  }), 'getOrCreateStatusSheet:create');
+  // Copy from master template if configured, otherwise create blank
+  const templateId = process.env.ONBOARDING_STATUS_TEMPLATE_ID;
+  let spreadsheetId;
 
-  const spreadsheetId = spreadsheet.data.spreadsheetId;
-  const sheetId = spreadsheet.data.sheets[0].properties.sheetId;
+  if (templateId) {
+    const copy = await apiWithRetry(() => drive.files.copy({
+      fileId: templateId,
+      requestBody: {
+        name: `Onboarding Status — ${employee.name} (${employee.employeeId})`,
+        parents: [targetFolderId],
+      },
+      fields: 'id',
+    }), 'getOrCreateStatusSheet:copyTemplate');
+    spreadsheetId = copy.data.id;
+    console.log(`[Status] Copied master template for ${employee.name}`);
+  } else {
+    const spreadsheet = await apiWithRetry(() => sheets.spreadsheets.create({
+      requestBody: {
+        properties: { title: `Onboarding Status — ${employee.name} (${employee.employeeId})` },
+        sheets: [{ properties: { title: 'Status' } }],
+      },
+    }), 'getOrCreateStatusSheet:create');
+    spreadsheetId = spreadsheet.data.spreadsheetId;
 
-  // Move it into the employee's own subfolder.
-  // Must remove the default "My Drive" parent or the file stays in both places.
-  const fileMeta = await drive.files.get({ fileId: spreadsheetId, fields: 'parents' });
-  const currentParents = (fileMeta.data.parents || []).join(',');
-  await drive.files.update({
-    fileId: spreadsheetId,
-    addParents: targetFolderId,
-    removeParents: currentParents,
-    fields: 'id, parents',
-  });
+    // Move out of My Drive into employee folder
+    const fileMeta = await drive.files.get({ fileId: spreadsheetId, fields: 'parents' });
+    const currentParents = (fileMeta.data.parents || []).join(',');
+    await drive.files.update({
+      fileId: spreadsheetId,
+      addParents: targetFolderId,
+      removeParents: currentParents,
+      fields: 'id, parents',
+    });
+  }
 
-  // Write header + all 16 milestones + progress bar row at top
+  // Write initial milestone data (statuses only — template already has formatting)
   const now = nowIST();
   const doneLabel = STATUS.DONE;
   const total = MILESTONES.length;
   const lastRow = 2 + total;
   const countifFormula = `=COUNTIF(B3:B${lastRow},"${doneLabel}")/${total}`;
   const pctFormula = `=TEXT(COUNTIF(B3:B${lastRow},"${doneLabel}")/${total},"0%")&" Complete ("&COUNTIF(B3:B${lastRow},"${doneLabel}")&"/${total})"`;
-  // Row 1: progress bar  Row 2: column headers  Rows 3-${lastRow}: milestones
   const rows = [
     ['Onboarding Progress', countifFormula, '', pctFormula],
     ['Milestone', 'Status', 'Last Updated', 'Notes'],
@@ -141,69 +153,68 @@ async function getOrCreateStatusSheet(auth, employee) {
     requestBody: { values: rows },
   });
 
-  // Format the sheet
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId,
-    requestBody: {
-      requests: [
-        // Progress bar row (row 1) — green background
-        {
-          repeatCell: {
-            range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
-            cell: {
-              userEnteredFormat: {
-                backgroundColor: { red: 0.13, green: 0.55, blue: 0.13 },
-                textFormat: { bold: true, fontSize: 12, foregroundColor: { red: 1, green: 1, blue: 1 } },
-                horizontalAlignment: 'CENTER',
+  if (!templateId) {
+    // Format only needed when creating from scratch (template already has formatting)
+    const sheetMeta = await sheets.spreadsheets.get({ spreadsheetId, fields: 'sheets.properties' });
+    const sheetId = sheetMeta.data.sheets[0].properties.sheetId;
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            repeatCell: {
+              range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
+              cell: {
+                userEnteredFormat: {
+                  backgroundColor: { red: 0.13, green: 0.55, blue: 0.13 },
+                  textFormat: { bold: true, fontSize: 12, foregroundColor: { red: 1, green: 1, blue: 1 } },
+                  horizontalAlignment: 'CENTER',
+                },
               },
+              fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)',
             },
-            fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)',
           },
-        },
-        // Header row (row 2) — dark background
-        {
-          repeatCell: {
-            range: { sheetId, startRowIndex: 1, endRowIndex: 2 },
-            cell: {
-              userEnteredFormat: {
-                backgroundColor: { red: 0.15, green: 0.15, blue: 0.15 },
-                textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } },
+          {
+            repeatCell: {
+              range: { sheetId, startRowIndex: 1, endRowIndex: 2 },
+              cell: {
+                userEnteredFormat: {
+                  backgroundColor: { red: 0.15, green: 0.15, blue: 0.15 },
+                  textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } },
+                },
               },
+              fields: 'userEnteredFormat(backgroundColor,textFormat)',
             },
-            fields: 'userEnteredFormat(backgroundColor,textFormat)',
           },
-        },
-        // Merge A1:E1 for the progress bar label
-        {
-          mergeCells: {
-            range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 2 },
-            mergeType: 'MERGE_ALL',
+          {
+            mergeCells: {
+              range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 2 },
+              mergeType: 'MERGE_ALL',
+            },
           },
-        },
-        // Format B1 as percentage
-        {
-          repeatCell: {
-            range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 1, endColumnIndex: 2 },
-            cell: {
-              userEnteredFormat: {
-                numberFormat: { type: 'PERCENT', pattern: '0%' },
-                backgroundColor: { red: 0.13, green: 0.55, blue: 0.13 },
-                textFormat: { bold: true, fontSize: 14, foregroundColor: { red: 1, green: 1, blue: 1 } },
-                horizontalAlignment: 'CENTER',
+          {
+            repeatCell: {
+              range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 1, endColumnIndex: 2 },
+              cell: {
+                userEnteredFormat: {
+                  numberFormat: { type: 'PERCENT', pattern: '0%' },
+                  backgroundColor: { red: 0.13, green: 0.55, blue: 0.13 },
+                  textFormat: { bold: true, fontSize: 14, foregroundColor: { red: 1, green: 1, blue: 1 } },
+                  horizontalAlignment: 'CENTER',
+                },
               },
+              fields: 'userEnteredFormat(numberFormat,backgroundColor,textFormat,horizontalAlignment)',
             },
-            fields: 'userEnteredFormat(numberFormat,backgroundColor,textFormat,horizontalAlignment)',
           },
-        },
-        // Auto resize columns
-        {
-          autoResizeDimensions: {
-            dimensions: { sheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: 5 },
+          {
+            autoResizeDimensions: {
+              dimensions: { sheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: 5 },
+            },
           },
-        },
-      ],
-    },
-  });
+        ],
+      },
+    });
+  }
 
   employee.statusSheetId = spreadsheetId;
   console.log(`[Status] Created status sheet for ${employee.name} → https://docs.google.com/spreadsheets/d/${spreadsheetId}`);
