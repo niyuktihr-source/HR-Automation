@@ -30,12 +30,12 @@ async function buildAuth() {
 
 async function deleteDriveFile(auth, fileId) {
   const drive = google.drive({ version: 'v3', auth });
-  await drive.files.delete({ fileId });
+  await drive.files.update({ fileId, requestBody: { trashed: true } });
 }
 
 async function deleteDriveFolder(auth, folderId) {
   const drive = google.drive({ version: 'v3', auth });
-  await drive.files.delete({ fileId: folderId });
+  await drive.files.update({ fileId: folderId, requestBody: { trashed: true } });
 }
 
 async function main() {
