@@ -437,8 +437,6 @@ function appendBillRow(tab, bill, isCard, transactionId) {
   tab.getRange('C' + insertAt).setValue(descVal);
 
   if (isCard) {
-    // D = Transaction ID (for CC bank entries)
-    if (txnId) tab.getRange('D' + insertAt).setValue(txnId);
     // H = Receipt Nr
     tab.getRange('H' + insertAt).setValue(receiptNr);
   } else {
