@@ -1272,7 +1272,24 @@ async function handleReply(auth, classified, rawMsg) {
         }
         // If asset allocation email was never sent (contacts missing at t14 time), send it now
         const assetNeeded = !employee.assetRequired || !String(employee.assetRequired).trim().toLowerCase().startsWith('no');
-        if (!isTaskDone(employee.checklist, 't17') && employee.contacts && employee.contacts.managerEmail && assetNeeded) {
+        if (!isTaskDone(employee.checklist, 't17') && !assetNeeded) {
+          // Asset explicitly not required — auto-mark and update sheets
+          markAndLog(employee, 't17');
+          markAndLog(employee, 't18');
+          markAndLog(employee, 't19');
+          markAndLog(employee, 't20');
+          markAndLog(employee, 't21');
+          markAndLog(employee, 't22');
+          saveState(employee.employeeId, snapshotEmployee(employee));
+          markManagerConfirmed(auth, employee, {
+            officeLocation: employee.officeLocation || '',
+            assetType: 'No asset required',
+            supervisorName: '',
+          }).catch(err => console.warn(`[Index] Status sheet milestone 5 update failed for ${employee.name}: ${err.message}`));
+          markITConfirmed(auth, employee)
+            .catch(err => console.warn(`[Index] Status sheet milestone 6 update failed for ${employee.name}: ${err.message}`));
+          console.log(`[Index] Asset not required for ${employee.name} — t17–t22 auto-marked, sheets updated`);
+        } else if (!isTaskDone(employee.checklist, 't17') && employee.contacts && employee.contacts.managerEmail) {
           await sendAssetAllocationRequest(employee, employee.contacts.managerEmail).catch(err =>
             console.warn(`[Index] Asset allocation request failed for ${employee.name}: ${err.message}`)
           );
@@ -1834,7 +1851,7 @@ async function onboardEmployee(auth, employee) {
       }
 
       // Asset allocation request to manager (t17) + IT request (t20)
-      // If assetRequired is "No" in recruiter form — skip both emails, auto-mark all tasks done
+      // If assetRequired is "No" in recruiter form — skip both emails, auto-mark all tasks done, update status sheets
       const assetNeeded = !employee.assetRequired || !String(employee.assetRequired).trim().toLowerCase().startsWith('no');
       if (!assetNeeded) {
         if (!isTaskDone(employee.checklist, 't17')) {
@@ -1846,6 +1863,14 @@ async function onboardEmployee(auth, employee) {
           markAndLog(employee, 't22');
           saveState(employee.employeeId, snapshotEmployee(employee));
           console.log(`[Index] Asset not required for ${employee.name} — t17–t22 auto-marked, no emails sent`);
+          // Update status sheet milestones 5 (manager) and 6 (IT) to Done
+          markManagerConfirmed(auth, employee, {
+            officeLocation: employee.officeLocation || '',
+            assetType: 'No asset required',
+            supervisorName: '',
+          }).catch(err => console.warn(`[Index] Status sheet milestone 5 update failed for ${employee.name}: ${err.message}`));
+          markITConfirmed(auth, employee)
+            .catch(err => console.warn(`[Index] Status sheet milestone 6 update failed for ${employee.name}: ${err.message}`));
         }
       } else if (!isTaskDone(employee.checklist, 't17') && employee.contacts && employee.contacts.managerEmail) {
         markAndLog(employee, 't17');

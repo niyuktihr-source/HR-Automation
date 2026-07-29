@@ -445,7 +445,7 @@ app.post('/recruiter-form', employeeCreateLimiter, async (req, res) => {
     },
   };
 
-  console.log(`[Webhook] /recruiter-form — received submission for ${name} (${employeeId}), DOJ: ${doj}`);
+  console.log(`[Webhook] /recruiter-form — received submission for ${name} (${employeeId}), DOJ: ${doj}, assetRequired: ${JSON.stringify(assetRequired)} → stored as: ${JSON.stringify(assetRequired || 'Unaware — To be confirmed')}`);
 
   try {
     if (_onNewEmployee) await _onNewEmployee(employeeData);

@@ -115,24 +115,28 @@ function onRecruiterFormSubmit(e) {
   const data = {};
 
   for (const r of responses) {
-    const title = r.getItem().getTitle();
+    const title = r.getItem().getTitle().trim();
+    const t = title.toLowerCase();
     const value = r.getResponse();
 
-    if (title === 'Employee Full Name')              data.name = value;
-    else if (title === 'Employee ID')                data.employeeId = value;
-    else if (title === 'Personal Email ID')          data.personalEmail = value;
-    else if (title === 'Phone Number')               data.phoneNumber = value;
-    else if (title === 'Date of Joining (DOJ)')      data.doj = value; // format: yyyy-mm-dd
-    else if (title === 'Is this a Fresher?')         data.isFresher = value.startsWith('Yes');
-    else if (title === 'Reporting Manager\'s Full Name') data.managerName = value;
-    else if (title === 'Reporting Manager\'s Email ID')  data.managerEmail = value;
-    else if (title === 'IT Team Email ID')           data.itEmail = value;
-    else if (title === 'HR Email ID')                data.hrEmail = value;
-    else if (title === 'Work Location')              data.officeLocation = value;
-    else if (title === 'Asset Required?')            data.assetRequired = value;
-    else if (title === 'Designation / Role')         data.designation = value;
-    else if (title === 'Google Drive Root Folder ID') data.driveFolderId = value;
+    if (t === 'employee full name')                    data.name = value;
+    else if (t === 'employee id')                      data.employeeId = value;
+    else if (t === 'personal email id')                data.personalEmail = value;
+    else if (t === 'phone number')                     data.phoneNumber = value;
+    else if (t === 'date of joining (doj)')            data.doj = value;
+    else if (t === 'is this a fresher?')               data.isFresher = value.startsWith('Yes') || value.startsWith('yes');
+    else if (t === "reporting manager's full name")    data.managerName = value;
+    else if (t === "reporting manager's email id")     data.managerEmail = value;
+    else if (t === 'it team email id')                 data.itEmail = value;
+    else if (t === 'hr email id')                      data.hrEmail = value;
+    else if (t === 'work location')                    data.officeLocation = value;
+    else if (t === 'asset required?' || t === 'asset required') data.assetRequired = value;
+    else if (t === 'designation / role')               data.designation = value;
+    else if (t === 'google drive root folder id')      data.driveFolderId = value;
+    else Logger.log('Unmatched form question: "' + title + '" = "' + value + '"');
   }
+
+  Logger.log('Mapped data: ' + JSON.stringify(data));
 
   // Build the recruiter email from the form submission (for the record)
   const recruiterEmail = e.response.getRespondentEmail();
