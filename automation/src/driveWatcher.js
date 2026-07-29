@@ -446,7 +446,7 @@ async function getChangedFiles(auth, folderId, sinceMs) {
   const sinceISO = new Date(sinceMs).toISOString();
   // Use 'in ancestors' so files inside subfolders are included (not just direct children)
   const res = await apiWithRetry(() => drive.files.list({
-    q: `'${folderId}' in ancestors and trashed = false and modifiedTime > '${sinceISO}' and mimeType != 'application/vnd.google-apps.folder'`,
+    q: `'${folderId}' in parents and trashed = false and modifiedTime > '${sinceISO}' and mimeType != 'application/vnd.google-apps.folder'`,
     fields: 'files(id, name, mimeType, modifiedTime, createdTime, parents)',
     orderBy: 'createdTime desc',
   }), 'getChangedFiles');
