@@ -60,11 +60,15 @@ async function registerGmailWatch(auth) {
   });
 
   const state = loadGmailState();
-  state.historyId = res.data.historyId;
+  // Preserve existing historyId so getNewMessages catches up on messages
+  // that arrived during the restart gap. Only set if none saved yet.
+  if (!state.historyId) {
+    state.historyId = res.data.historyId;
+  }
   state.watchExpiry = Date.now() + 6 * 24 * 60 * 60 * 1000; // renew after 6 days
   saveGmailState(state);
 
-  console.log(`[Gmail] Watch registered — historyId: ${res.data.historyId}`);
+  console.log(`[Gmail] Watch registered — historyId: ${res.data.historyId} (processing from: ${state.historyId})`);
 
   // Auto-renew before expiry
   setTimeout(() => renewGmailWatch(auth), 6 * 24 * 60 * 60 * 1000);
