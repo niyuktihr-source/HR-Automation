@@ -1514,8 +1514,13 @@ async function handleReply(auth, classified, rawMsg) {
       };
       const subfolder = DOC_LABEL_TO_SUBFOLDER[rawDocLabel.toLowerCase()] || null;
 
-      console.log(`[DocReupload] Processing ${attachments.length} attachment(s) from ${employee.name} — docType: ${rawDocLabel || 'unknown'}`);
+      if (!subfolder) {
+        console.warn(`[DocReupload] Could not map docType "${rawDocLabel}" to a subfolder for ${employee.name} — will let Gemini classify from filename/content`);
+      }
 
+      console.log(`[DocReupload] Processing ${attachments.length} attachment(s) from ${employee.name} — docType: "${rawDocLabel || 'unknown'}" → subfolder: ${subfolder || 'auto-detect'}`);
+
+      let anyUploaded = false;
       for (const att of attachments) {
         try {
           // Download attachment from Gmail
@@ -1529,15 +1534,40 @@ async function handleReply(auth, classified, rawMsg) {
             continue;
           }
 
-          // Upload to Drive in the correct subfolder
-          const targetSubfolder = subfolder || 'Aadhaar'; // fallback — engine will re-classify from content
+          // If subfolder unknown, use filename keywords to guess; fall through to Aadhaar only as last resort
+          let targetSubfolder = subfolder;
+          if (!targetSubfolder) {
+            const fname = att.filename.toLowerCase();
+            if (fname.includes('offer') || fname.includes('appointment')) targetSubfolder = 'Offer_Letter';
+            else if (fname.includes('aadhaar') || fname.includes('aadhar')) targetSubfolder = 'Aadhaar';
+            else if (fname.includes('pan')) targetSubfolder = 'PAN';
+            else if (fname.includes('payslip') || fname.includes('salary')) targetSubfolder = 'Payslip';
+            else if (fname.includes('relieving')) targetSubfolder = 'Relieving_Letter';
+            else if (fname.includes('degree')) targetSubfolder = 'Degree_Certificate';
+            else if (fname.includes('10th') || fname.includes('tenth')) targetSubfolder = 'Marksheet_10th';
+            else if (fname.includes('12th') || fname.includes('twelfth')) targetSubfolder = 'Marksheet_12th';
+            else targetSubfolder = 'Aadhaar'; // last resort — Gemini will re-classify from content
+            console.log(`[DocReupload] Guessed subfolder from filename: ${targetSubfolder} for ${att.filename}`);
+          }
+
           const subfolderRes = await drive.files.list({
             q: `name='${targetSubfolder}' and '${employee.driveFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
             fields: 'files(id)',
           });
           const targetFolderId = subfolderRes.data.files && subfolderRes.data.files[0] && subfolderRes.data.files[0].id;
           if (!targetFolderId) {
-            console.warn(`[DocReupload] Subfolder '${targetSubfolder}' not found for ${employee.name}`);
+            // Subfolder doesn't exist — upload to root Drive folder so Gemini can classify
+            console.warn(`[DocReupload] Subfolder '${targetSubfolder}' not found for ${employee.name} — uploading to root folder`);
+            const rootUploadRes = await drive.files.create({
+              requestBody: { name: att.filename, parents: [employee.driveFolderId] },
+              media: { mimeType: att.mimeType, body: require('stream').Readable.from(buffer) },
+              fields: 'id, name, mimeType',
+            });
+            console.log(`[DocReupload] Uploaded ${rootUploadRes.data.name} to root folder for ${employee.name} (subfolder missing)`);
+            await handleNewFile(auth, employee, rootUploadRes.data, null).catch(err =>
+              console.error(`[DocReupload] handleNewFile error for ${rootUploadRes.data.name}: ${err.message}`)
+            );
+            anyUploaded = true;
             continue;
           }
 
@@ -1549,7 +1579,8 @@ async function handleReply(auth, classified, rawMsg) {
             fields: 'id, name, mimeType',
           });
           const uploadedFile = uploadRes.data;
-          console.log(`[DocReupload] Uploaded ${uploadedFile.name} to ${targetSubfolder} for ${employee.name}`);
+          console.log(`[DocReupload] Uploaded ${uploadedFile.name} to ${targetSubfolder} for ${employee.name} — running verification`);
+          anyUploaded = true;
 
           // Run verification — same path as any Drive upload
           await handleNewFile(auth, employee, uploadedFile, targetSubfolder).catch(err =>
@@ -1558,6 +1589,9 @@ async function handleReply(auth, classified, rawMsg) {
         } catch (err) {
           console.error(`[DocReupload] Error processing attachment ${att.filename}: ${err.message}`);
         }
+      }
+      if (!anyUploaded) {
+        console.warn(`[DocReupload] No attachments were uploaded for ${employee.name} — reply may have been empty or all attachments failed`);
       }
       saveState(employee.employeeId, snapshotEmployee(employee));
       break;
