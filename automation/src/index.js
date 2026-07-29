@@ -1875,9 +1875,9 @@ async function onboardEmployee(auth, employee) {
       }
     };
 
-    if (dojStr === todayStr) {
+    if (dojStr <= todayStr) {
       await fireDOJEmails();
-    } else if (dojDate > new Date()) {
+    } else {
       const msUntilDOJ = dojDate.getTime() - Date.now();
       setTimeout(fireDOJEmails, msUntilDOJ);
       console.log(`[Index] DOJ emails (official email, asset allocation, BGV initiate) scheduled for ${dojStr} for ${employee.name}`);
@@ -1955,7 +1955,9 @@ async function main() {
     console.warn('[Config]   Drive push notifications will not work — falling back to polling.\n');
   }
 
-  if (!process.env.PREONBOARDING_FORM_LINK) {
+  if (!process.env.PREONBOARDING_FORM_LINK &&
+      !process.env.PREONBOARDING_FORM_FRESHER_LINK &&
+      !process.env.PREONBOARDING_FORM_EXPERIENCED_LINK) {
     console.warn('[Config] WARNING: PREONBOARDING_FORM_LINK is not set.');
     console.warn('[Config]   Welcome email will show a warning instead of a form link.\n');
   }
