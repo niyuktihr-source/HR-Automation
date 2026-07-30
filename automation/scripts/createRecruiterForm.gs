@@ -156,7 +156,7 @@ function onRecruiterFormSubmit(e) {
     const response = UrlFetchApp.fetch(engineUrl, options);
     Logger.log('Engine response: ' + response.getContentText());
 
-    if (response.getResponseCode() === 200) {
+    if (response.getResponseCode() >= 200 && response.getResponseCode() < 300) {
       Logger.log('✅ Onboarding triggered successfully for ' + data.name);
     } else {
       Logger.log('❌ Engine returned error: ' + response.getResponseCode());
