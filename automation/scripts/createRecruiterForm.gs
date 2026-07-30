@@ -143,7 +143,7 @@ function onRecruiterFormSubmit(e) {
   data.recruiterEmail = recruiterEmail;
 
   // POST to engine webhook
-  const engineUrl = 'YOUR_ENGINE_WEBHOOK_URL/recruiter-form'; // replace with your ngrok/production URL
+  const engineUrl = 'https://hr.aletheatech.com/recruiter-form'; // production engine webhook
   const payload = JSON.stringify(data);
 
   try {
