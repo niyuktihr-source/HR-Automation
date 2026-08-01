@@ -768,20 +768,15 @@ async function triggerNextStep(auth, employee, docType) {
   if (docType === 'aadhaar' || docType === 'pan') {
     const vr = employee.verificationResults || {};
     const bothVerified = vr.aadhaar && vr.aadhaar.valid && vr.pan && vr.pan.valid;
-    const lockKey = `${employee.employeeId}:t14`;
-    if (bothVerified && !isTaskDone(checklist, 't14') && !_triggerLocks.has(lockKey)) {
+    const lockKey = `${employee.employeeId}:docsVerified`;
+    if (bothVerified && !_triggerLocks.has(lockKey)) {
       _triggerLocks.add(lockKey);
-      // Mark t14 and persist to disk immediately — before any await — so concurrent
-      // poll cycles that pass the isTaskDone check above will see it done on next read.
-      // Mark t14 and update Drive/status — doc verification is now complete.
-      // Official email, asset allocation, and BGV initiate all fire on DOJ independently.
-      markAndLog(employee, 't14');
-      saveState(employee.employeeId, snapshotEmployee(employee));
+      // Both identity docs verified — update Drive/status sheet.
+      // t14 (official email request) is intentionally NOT marked here.
+      // fireDOJEmails() marks t14 and sends the email on DOJ morning.
       await markDocumentsVerifiedOk(auth, employee).catch(() => {});
       await uploadChecklist(auth, employee.driveFolderId, checklist);
       saveState(employee.employeeId, snapshotEmployee(employee));
-      // Lock stays set permanently — t14 is now done so the isTaskDone guard
-      // will catch any future re-entry; lock only needed for the race window.
     }
   }
 
