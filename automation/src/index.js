@@ -1855,15 +1855,13 @@ async function onboardEmployee(auth, employee) {
     }
   }
 
-  // On DOJ — fire official email creation, asset allocation, and BGV initiate
-  // independently of document verification status.
+  // 2 days before DOJ — fire official email creation request.
+  // If that date falls on a weekend, send on the preceding Friday instead.
+  // Examples: Monday DOJ → Friday; Tuesday DOJ → Friday; Wednesday DOJ → Monday.
   {
-    const dojDate  = new Date(employee.doj);
     const todayStr = new Date().toISOString().split('T')[0];
-    const dojStr   = employee.doj ? employee.doj.split('T')[0] : '';
 
-    const fireDOJEmails = async () => {
-      // Official email creation request (t14)
+    const fireOfficialEmailRequest = async () => {
       if (!isTaskDone(employee.checklist, 't14')) {
         markAndLog(employee, 't14');
         saveState(employee.employeeId, snapshotEmployee(employee));
@@ -1876,9 +1874,32 @@ async function onboardEmployee(auth, employee) {
           `The system sent HR an email asking them to create the official ${process.env.COMPANY_NAME || ''} email ID and Greythr login for ${employee.name} (DOJ: ${employee.doj}). HR needs to create both accounts and reply with the official email ID and Greythr confirmation. No response has been received.`
         );
         saveState(employee.employeeId, snapshotEmployee(employee));
-        console.log(`[Index] Official email creation request sent on DOJ for ${employee.name}`);
+        console.log(`[Index] Official email creation request sent for ${employee.name}`);
       }
+    };
 
+    const preDOJDate = new Date(employee.doj);
+    preDOJDate.setDate(preDOJDate.getDate() - 2);
+    if (preDOJDate.getDay() === 6) preDOJDate.setDate(preDOJDate.getDate() - 1); // Saturday → Friday
+    if (preDOJDate.getDay() === 0) preDOJDate.setDate(preDOJDate.getDate() - 2); // Sunday → Friday
+    const preDOJStr = preDOJDate.toISOString().split('T')[0];
+
+    if (preDOJStr <= todayStr) {
+      await fireOfficialEmailRequest();
+    } else {
+      const msUntilPreDOJ = preDOJDate.getTime() - Date.now();
+      setTimeout(fireOfficialEmailRequest, msUntilPreDOJ);
+      console.log(`[Index] Official email creation request scheduled for ${preDOJStr} (2 days before DOJ) for ${employee.name}`);
+    }
+  }
+
+  // On DOJ — fire asset allocation and BGV initiate independently of document verification.
+  {
+    const dojDate  = new Date(employee.doj);
+    const todayStr = new Date().toISOString().split('T')[0];
+    const dojStr   = employee.doj ? employee.doj.split('T')[0] : '';
+
+    const fireDOJEmails = async () => {
       // Asset allocation request to manager (t17) + IT request (t20)
       // If assetRequired is "No" in recruiter form — skip both emails, auto-mark all tasks done, update status sheets
       const assetNeeded = !employee.assetRequired || !String(employee.assetRequired).trim().toLowerCase().startsWith('no');
@@ -1934,7 +1955,7 @@ async function onboardEmployee(auth, employee) {
     } else {
       const msUntilDOJ = dojDate.getTime() - Date.now();
       setTimeout(fireDOJEmails, msUntilDOJ);
-      console.log(`[Index] DOJ emails (official email, asset allocation, BGV initiate) scheduled for ${dojStr} for ${employee.name}`);
+      console.log(`[Index] DOJ emails (asset allocation, BGV initiate) scheduled for ${dojStr} for ${employee.name}`);
     }
   }
 
