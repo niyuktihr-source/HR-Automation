@@ -197,7 +197,7 @@ function onExperiencedFormSubmit(e) {
   var personalDetails = {};
 
   for (var i = 0; i < responses.length; i++) {
-    var title = responses[i].getItem().getTitle();
+    var title = responses[i].getItem().getTitle().trim();
     var value = responses[i].getResponse();
 
     if (title === 'Drive Folder ID' || title === 'Drive Folder ID( Pre-filled by HR — do not edit)') {
