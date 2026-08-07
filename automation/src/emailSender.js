@@ -68,7 +68,7 @@ async function sendPreOnboardingForm(employee) {
     : (process.env.PREONBOARDING_FORM_EXPERIENCED_LINK || process.env.PREONBOARDING_FORM_LINK || '');
 
   // Entry IDs for "Employee ID" and "Drive Folder ID" hidden fields in each form
-  const FRESHER_EMPLOYEE_ID_ENTRY  = 'entry.2095349177';
+  const FRESHER_EMPLOYEE_ID_ENTRY  = 'entry.2053877771';
   const FRESHER_FOLDER_ID_ENTRY    = 'entry.744388872';
   const EXPERIENCED_EMPLOYEE_ID_ENTRY = 'entry.2039881686';
   const EXPERIENCED_FOLDER_ID_ENTRY   = 'entry.1556025136';
