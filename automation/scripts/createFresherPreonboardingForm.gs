@@ -82,12 +82,7 @@ function createFresherPreonboardingForm() {
 
   form.addTextItem()
     .setTitle('Current Address Proof')
-    .setHelpText('Where you currently live — Aadhaar card, PG rent slip, wifi bill, electricity bill, or rent agreement. — Change this question type to File Upload')
-    .setRequired(true);
-
-  form.addTextItem()
-    .setTitle('Permanent Address Proof')
-    .setHelpText('Your hometown/permanent address — Aadhaar card only. — Change this question type to File Upload')
+    .setHelpText('PG rent slip, wifi bill, electricity bill, or rent agreement showing your current address. — Change this question type to File Upload')
     .setRequired(true);
 
   form.addTextItem()
@@ -152,7 +147,6 @@ var FOLDER_MAP = {
   'Upload Aadhaar Card':           'Aadhaar',
   'Upload PAN Card':               'PAN',
   'Current Address Proof':         'Current_Address_Proof',
-  'Permanent Address Proof':       'Permanent_Address_Proof',
   'Upload Passport Size Photo':    'Passport_Photo',
   'Upload Offer Letter':           'Offer_Letter',
   'Upload 10th Marksheet':         'Marksheet_10th',
