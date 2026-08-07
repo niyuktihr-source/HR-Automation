@@ -1588,6 +1588,26 @@ async function sendManagerConfirmationRequest(employee, managerEmail, dayMark) {
   });
 }
 
+async function sendNoJoinNotification(employee) {
+  const { name, employeeId, doj, contacts } = employee;
+  const co = esc(process.env.COMPANY_NAME || '');
+  const recruiterEmail = (contacts && contacts.recruiterEmail) || process.env.HR_EMAIL;
+  const hrEmailAddr = (contacts && contacts.hrEmail) || process.env.HR_EMAIL;
+  const recipients = [...new Set([recruiterEmail, hrEmailAddr].filter(Boolean))].join(', ');
+
+  await sendEmail({
+    to: recipients,
+    subject: `[Auto-Removed] ${esc(name)} (${esc(employeeId)}) — Pre-Onboarding Form Not Submitted`,
+    html: `
+      <p>Hi,</p>
+      <p><strong>${esc(name)} (${esc(employeeId)})</strong> was scheduled to join on <strong>${esc(doj ? doj.split('T')[0] : '')}</strong>.</p>
+      <p>Despite the welcome email and 3 follow-up reminders, the pre-onboarding form was not submitted within <strong>7 days</strong>. The candidate has been <strong>automatically removed</strong> from the onboarding system.</p>
+      <p>If the candidate still intends to join, please contact HR to re-initiate the onboarding process.</p>
+      <p>Regards,<br/>${co} HR Automation</p>
+    `,
+  });
+}
+
 module.exports = {
   sendEmail,
   sendPreOnboardingForm,
@@ -1595,6 +1615,7 @@ module.exports = {
   sendDocumentReminder,
   sendPreOnboardingReminder,
   sendNoResponseAlert,
+  sendNoJoinNotification,
   sendOfficialEmailCreationRequest,
   sendOfficialEmailAccessTest,
   sendAssetAllocationRequest,

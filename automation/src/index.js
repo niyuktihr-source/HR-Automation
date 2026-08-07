@@ -9,6 +9,7 @@ const {
   sendPreOnboardingForm,
   sendDocumentRejection,
   sendNoResponseAlert,
+  sendNoJoinNotification,
   sendOfficialEmailCreationRequest,
   sendOfficialEmailAccessTest,
   sendAssetAllocationRequest,
@@ -179,6 +180,7 @@ function snapshotEmployee(employee) {
     replyTimerExpiry,
     officialEmail: employee.officialEmail || '',
     assetDetails: employee.assetDetails || {},
+    preOnboardingFormSentAt: employee.preOnboardingFormSentAt || null,
   };
 }
 
@@ -1771,11 +1773,14 @@ async function onboardEmployee(auth, employee) {
           await sendPreOnboardingForm(employee).catch(err =>
             console.warn(`[Index] Pre-onboarding form send failed for ${employee.name}: ${err.message}`)
           );
+          employee.preOnboardingFormSentAt = new Date().toISOString();
+          saveState(employee.employeeId, snapshotEmployee(employee));
           activityLog.log(employee, 'pre_onboarding_email_sent', employee.personalEmail);
         }, sendDelayMs);
       } else {
         // DOJ is within 10 days — send immediately
         await sendPreOnboardingForm(employee);
+        employee.preOnboardingFormSentAt = new Date().toISOString();
         markAndLog(employee, 't4');
         activityLog.log(employee, 'pre_onboarding_email_sent', employee.personalEmail);
       }
@@ -1790,6 +1795,46 @@ async function onboardEmployee(auth, employee) {
       employee,
       (employee.contacts && employee.contacts.recruiterEmail) || process.env.HR_EMAIL
     );
+
+    // Step 6b: Auto-remove if form still not submitted 7 days after it was sent.
+    // Covers both fresh starts (preOnboardingFormSentAt just set) and restarts
+    // (preOnboardingFormSentAt loaded from saved state).
+    if (employee.preOnboardingFormSentAt && !isTaskDone(employee.checklist, 't5')) {
+      const autoRemoveDeadline = new Date(employee.preOnboardingFormSentAt);
+      autoRemoveDeadline.setDate(autoRemoveDeadline.getDate() + 7);
+
+      const autoRemoveIfNoSubmission = async () => {
+        if (isTaskDone(employee.checklist, 't5')) return; // filled in the meantime
+        console.log(`[Index] Auto-removing ${employee.name} — no form submission 7 days after form sent`);
+        if (employee.replyTimers) {
+          for (const t of Object.values(employee.replyTimers)) {
+            if (t && typeof t.stop === 'function') t.stop();
+          }
+        }
+        if (employee.noResponseTimers) {
+          for (const t of Object.values(employee.noResponseTimers)) {
+            if (t && typeof t.stop === 'function') t.stop();
+          }
+        }
+        cancelAllJobs(employee.employeeId);
+        await sendNoJoinNotification(employee).catch(err =>
+          console.warn(`[Index] No-join notification failed for ${employee.name}: ${err.message}`)
+        );
+        const statePath = statePathFor(employee.employeeId);
+        if (fs.existsSync(statePath)) fs.unlinkSync(statePath);
+        delete employeeRegistry[employee.employeeId];
+        console.log(`[Index] ${employee.name} (${employee.employeeId}) auto-removed — no form submission after 7 days`);
+      };
+
+      const msLeft = autoRemoveDeadline.getTime() - Date.now();
+      if (msLeft <= 0) {
+        await autoRemoveIfNoSubmission();
+        return; // stop further onboarding setup for this employee
+      } else {
+        setTimeout(autoRemoveIfNoSubmission, msLeft);
+        console.log(`[Index] Auto-remove scheduled for ${autoRemoveDeadline.toDateString()} if ${employee.name} has not submitted form`);
+      }
+    }
 
     // Step 7: Schedule optional-doc N/A timers — if payslip/relieving letter not
     // uploaded within grace period, auto-mark as N/A so the flow isn't blocked.
