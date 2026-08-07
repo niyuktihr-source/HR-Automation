@@ -86,6 +86,11 @@ function createFresherPreonboardingForm() {
     .setRequired(true);
 
   form.addTextItem()
+    .setTitle('Permanent Address Proof')
+    .setHelpText('Aadhaar card showing your permanent/hometown address. — Change this question type to File Upload')
+    .setRequired(true);
+
+  form.addTextItem()
     .setTitle('Upload Passport Size Photo')
     .setHelpText('Recent photo taken within the last 3 months. Plain white or light background. JPG preferred. — Change this question type to File Upload')
     .setRequired(true);
@@ -147,6 +152,7 @@ var FOLDER_MAP = {
   'Upload Aadhaar Card':           'Aadhaar',
   'Upload PAN Card':               'PAN',
   'Current Address Proof':         'Current_Address_Proof',
+  'Permanent Address Proof':       'Permanent_Address_Proof',
   'Upload Passport Size Photo':    'Passport_Photo',
   'Upload Offer Letter':           'Offer_Letter',
   'Upload 10th Marksheet':         'Marksheet_10th',
