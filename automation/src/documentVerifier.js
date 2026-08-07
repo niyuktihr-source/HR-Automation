@@ -225,7 +225,7 @@ Only set valid=true if ALL four checks pass.`,
   "failureReasons": ["list any failed checks in plain English"],
   "summary": "one sentence summary"
 }
-Only set valid=true if ALL four checks pass.`,
+Important: For PG rent slips, the employee's name may not appear on the document — this is normal and acceptable. Set nameVisible=true for PG rent slips as long as the PG address is clearly visible. Only set valid=false if the document is illegible, shows no address at all, or is not one of the valid document types listed above.`,
 
   permanentAddressProof: `You are verifying a permanent address proof document submitted by a new employee. The only valid document is an Aadhaar card. Check ALL of the following and respond with a JSON object:
 {
