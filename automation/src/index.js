@@ -1841,10 +1841,10 @@ async function onboardEmployee(auth, employee) {
     const dojStr   = employee.doj ? employee.doj.split('T')[0] : '';
     const needsInduction = !isTaskDone(employee.checklist, 't27') || !isTaskDone(employee.checklist, 't29');
     if (needsInduction) {
-      if (dojStr === todayStr) {
+      if (dojStr <= todayStr) {
         await fireInductionAndProjectIntro(auth, employee);
         console.log(`[Index] HR induction + project intro fired on DOJ for ${employee.name}`);
-      } else if (dojDate > new Date()) {
+      } else {
         const msUntilDOJ = dojDate.getTime() - Date.now();
         setTimeout(async () => {
           await fireInductionAndProjectIntro(auth, employee);
@@ -1923,18 +1923,19 @@ async function onboardEmployee(auth, employee) {
             .catch(err => console.warn(`[Index] Status sheet milestone 6 update failed for ${employee.name}: ${err.message}`));
         }
       } else if (!isTaskDone(employee.checklist, 't17') && employee.contacts && employee.contacts.managerEmail) {
-        markAndLog(employee, 't17');
-        saveState(employee.employeeId, snapshotEmployee(employee));
-        await sendAssetAllocationRequest(employee, employee.contacts.managerEmail).catch(err =>
-          console.warn(`[Index] Asset allocation request failed for ${employee.name}: ${err.message}`)
-        );
-        employee.replyTimers = employee.replyTimers || {};
-        employee.replyTimers.manager = scheduleReplyDeadline(
-          employee, 'Reporting Manager', employee.contacts.managerEmail, null,
-          `The system sent the reporting manager an asset allocation request for ${employee.name} (DOJ: ${employee.doj}). The manager needs to confirm what assets (laptop, accessories, etc.) should be assigned to this employee and reply so IT can proceed. No response has been received.`
-        );
-        saveState(employee.employeeId, snapshotEmployee(employee));
-        console.log(`[Index] Asset allocation request sent on DOJ for ${employee.name}`);
+        try {
+          await sendAssetAllocationRequest(employee, employee.contacts.managerEmail);
+          markAndLog(employee, 't17');
+          employee.replyTimers = employee.replyTimers || {};
+          employee.replyTimers.manager = scheduleReplyDeadline(
+            employee, 'Reporting Manager', employee.contacts.managerEmail, null,
+            `The system sent the reporting manager an asset allocation request for ${employee.name} (DOJ: ${employee.doj}). The manager needs to confirm what assets (laptop, accessories, etc.) should be assigned to this employee and reply so IT can proceed. No response has been received.`
+          );
+          saveState(employee.employeeId, snapshotEmployee(employee));
+          console.log(`[Index] Asset allocation request sent on DOJ for ${employee.name}`);
+        } catch (err) {
+          console.warn(`[Index] Asset allocation request failed for ${employee.name}: ${err.message}`);
+        }
       }
 
       // BGV initiate email to recruiter (t23)

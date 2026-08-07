@@ -109,6 +109,20 @@ function isTaskDone(checklist, taskId) {
 // Determine if a milestone is overdue based on DOJ + expected day range
 function milestoneStatus(employee, milestoneIdx) {
   const taskKey = MILESTONE_TASKS[milestoneIdx];
+
+  // Docs Verified (t12): t12 is marked as soon as the first identity doc passes, so
+  // checking it alone gives false-green when other docs failed. Use verificationResults
+  // instead for an accurate colour.
+  if (taskKey === 't12') {
+    const vr = employee.verificationResults || {};
+    const results = Object.values(vr);
+    if (results.some(r => r && r.valid === false)) return 'notok';
+    if (isTaskDone(employee.checklist, taskKey)) return 'done';
+    const days = daysFromDOJ(employee.doj);
+    if (days !== null && days > 2) return 'overdue';
+    return 'pending';
+  }
+
   const done = isTaskDone(employee.checklist, taskKey);
   if (done) return 'done';
 
