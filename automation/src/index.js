@@ -10,6 +10,7 @@ const {
   sendDocumentRejection,
   sendNoResponseAlert,
   sendNoJoinNotification,
+  sendOnboardingStoppedNotification,
   sendOfficialEmailCreationRequest,
   sendOfficialEmailAccessTest,
   sendAssetAllocationRequest,
@@ -64,6 +65,7 @@ const {
   mark60DayDone,
   mark90DayDone,
   markPreprobationDone,
+  markOnboardingStopped,
   renameStatusSheet,
   createProjectIntroSheet,
   createEmployeeInfoSheet,
@@ -181,6 +183,8 @@ function snapshotEmployee(employee) {
     officialEmail: employee.officialEmail || '',
     assetDetails: employee.assetDetails || {},
     preOnboardingFormSentAt: employee.preOnboardingFormSentAt || null,
+    status: employee.status || 'active',
+    statusReason: employee.statusReason || '',
   };
 }
 
@@ -1120,6 +1124,58 @@ Respond ONLY with this exact JSON (no extra text):
   saveState(employee.employeeId, snapshotEmployee(employee));
 }
 
+// ─── Stop onboarding for an employee (Candidate Did Not Join / Stop Case) ───
+async function stopEmployeeOnboarding(auth, employee, reason) {
+  if (!employee) return;
+  const reasonStr = reason || 'Candidate did not join / Stop case requested';
+  console.log(`[Index] ⛔ Stopping onboarding for ${employee.name} (${employee.employeeId}). Reason: ${reasonStr}`);
+
+  employee.status = 'stopped';
+  employee.statusReason = reasonStr;
+  employee.isStopped = true;
+
+  // 1. Cancel all active milestone cron jobs
+  cancelAllJobs(employee.employeeId);
+
+  // 2. Clear all active reply timers & no-response timers
+  if (employee.replyTimers) {
+    for (const [key, t] of Object.entries(employee.replyTimers)) {
+      if (t && typeof t.stop === 'function') {
+        try { t.stop(); } catch (_) {}
+      }
+    }
+    employee.replyTimers = {};
+  }
+
+  if (employee.noResponseTimers) {
+    for (const [key, t] of Object.entries(employee.noResponseTimers)) {
+      if (t && typeof t.stop === 'function') {
+        try { t.stop(); } catch (_) {}
+      }
+    }
+    employee.noResponseTimers = {};
+  }
+
+  // 3. Log activity
+  activityLog.log(employee, 'onboarding_stopped', reasonStr);
+
+  // 4. Update Google Status Sheet
+  if (auth) {
+    await markOnboardingStopped(auth, employee, reasonStr).catch(err =>
+      console.warn(`[Index] Could not update status sheet for stopped employee ${employee.employeeId}:`, err.message)
+    );
+  }
+
+  // 5. Send notification email to HR, Manager, IT, Recruiter
+  await sendOnboardingStoppedNotification(employee, reasonStr).catch(err =>
+    console.warn(`[Index] Could not send onboarding stopped notification for ${employee.employeeId}:`, err.message)
+  );
+
+  // 6. Save state
+  saveState(employee.employeeId, snapshotEmployee(employee));
+  console.log(`[Index] ✅ Onboarding successfully stopped for ${employee.name} (${employee.employeeId}) — all notifications & cron jobs killed.`);
+}
+
 // ─── Handle classified Gmail reply ────────────────────────────────────────────
 async function handleReply(auth, classified, rawMsg) {
   const { replyType, data } = classified;
@@ -1145,6 +1201,7 @@ async function handleReply(auth, classified, rawMsg) {
       : '';
 
     const PENDING_TASK_MAP = {
+      candidate_no_join:          e => e.status !== 'stopped',
       it_allocation:              e => isTaskDone(e.checklist, 't20') && !isTaskDone(e.checklist, 't21'),
       manager_allocation:         e => isTaskDone(e.checklist, 't17') && !isTaskDone(e.checklist, 't18'),
       official_email_created:     e => !isTaskDone(e.checklist, 't15'),
@@ -1196,6 +1253,11 @@ async function handleReply(auth, classified, rawMsg) {
   activityLog.log(employee, 'reply_received', replyType);
 
   switch (replyType) {
+    case 'candidate_no_join': {
+      const reason = (data && (data.notes || data.reason)) || (rawMsg && rawMsg.subject) || 'Candidate did not join / Stop case requested via email';
+      await stopEmployeeOnboarding(auth, employee, reason);
+      break;
+    }
     case 'meeting_time_preference': {
       const pd = employee.personalDetails || {};
       if (data.inductionTime) {
@@ -2142,6 +2204,7 @@ async function main() {
     auth,
     employeeRegistry,
     cancelAllJobs,
+    stopEmployeeOnboarding: (emp, reason) => stopEmployeeOnboarding(auth, emp, reason),
     saveState: (employeeId, emp) => saveState(employeeId, snapshotEmployee(emp)),
     handleNewFile: (a, emp, file) => handleNewFile(a, emp, file),
     handleReply: (classified, rawMsg) => handleReply(auth, classified, rawMsg),

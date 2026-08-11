@@ -1608,6 +1608,44 @@ async function sendNoJoinNotification(employee) {
   });
 }
 
+async function sendOnboardingStoppedNotification(employee, reason) {
+  const { name, employeeId, doj, contacts } = employee;
+  const co = esc(process.env.COMPANY_NAME || '');
+  const recruiterEmail = (contacts && contacts.recruiterEmail) || process.env.HR_EMAIL;
+  const hrEmailAddr = (contacts && contacts.hrEmail) || process.env.HR_EMAIL;
+  const managerEmail = (contacts && contacts.managerEmail);
+  const itEmail = (contacts && contacts.itEmail);
+  const recipients = [...new Set([recruiterEmail, hrEmailAddr, managerEmail, itEmail].filter(Boolean))].join(', ');
+  const stopReason = esc(reason || 'Candidate did not join / Stop case requested');
+
+  await sendEmail({
+    to: recipients,
+    subject: `[STOPPED] ${esc(name)} (${esc(employeeId)}) — Onboarding & Notifications Cancelled`,
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;border:1px solid #e0e0e0;border-radius:8px;padding:24px;background:#ffffff;">
+        <div style="background:#d32f2f;color:#ffffff;padding:12px 16px;border-radius:6px;font-size:16px;font-weight:bold;margin-bottom:20px;">
+          ⛔ Onboarding Stopped — ${esc(name)} (${esc(employeeId)})
+        </div>
+        <p>Dear Team,</p>
+        <p>Please note that the onboarding process for <strong>${esc(name)}</strong> (ID: <strong>${esc(employeeId)}</strong>) has been <strong>STOPPED</strong>.</p>
+        <div style="background:#fff3e0;border-left:4px solid #ff9800;padding:12px 16px;margin:16px 0;border-radius:4px;">
+          <strong>Reason / Trigger:</strong> ${stopReason}
+        </div>
+        <p><strong>Actions automatically executed by system:</strong></p>
+        <ul>
+          <li>All scheduled daily notifications (including project intro tracking sheet reminders) have been cancelled.</li>
+          <li>All upcoming milestone reminder emails (25-day, 30-day, 60-day, 90-day, 5-month probation) have been stopped.</li>
+          <li>All pending document reminder chains and stakeholder reply timers have been terminated.</li>
+          <li>Employee status updated to <strong>STOPPED</strong> on the status sheet and master dashboard.</li>
+        </ul>
+        <p>No further action or email replies are required for this candidate.</p>
+        <hr style="border:none;border-top:1px solid #eeeeee;margin:20px 0;" />
+        <p style="color:#777777;font-size:12px;">Regards,<br/>${co} HR Automation Engine</p>
+      </div>
+    `,
+  });
+}
+
 module.exports = {
   sendEmail,
   sendPreOnboardingForm,
@@ -1616,6 +1654,7 @@ module.exports = {
   sendPreOnboardingReminder,
   sendNoResponseAlert,
   sendNoJoinNotification,
+  sendOnboardingStoppedNotification,
   sendOfficialEmailCreationRequest,
   sendOfficialEmailAccessTest,
   sendAssetAllocationRequest,

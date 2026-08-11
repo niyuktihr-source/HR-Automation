@@ -10,6 +10,7 @@
     "add-employee": "node src/addEmployee.js",
     "list-employees": "node src/listEmployees.js",
     "remove-employee": "node src/removeEmployee.js",
+    "stop-employee": "node src/stopEmployee.js",
     "reset-employee": "node src/resetEmployee.js",
     "view-state": "node src/viewState.js",
     "mark-task": "node src/markTask.js",

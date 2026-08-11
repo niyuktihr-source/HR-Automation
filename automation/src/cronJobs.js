@@ -460,6 +460,10 @@ function scheduleAllMilestones(employee, contacts, markTaskFn) {
 // completedMilestones: array of completed task IDs e.g. ['t38', 't45']
 // Task → milestone map: survey→t38, 30day→t45, 60day→t48, 90day→t51, probation→t52
 function restoreMilestonesAfterRestart(employee, contacts, completedMilestones, markTaskFn) {
+  if (employee.status === 'stopped' || employee.isStopped) {
+    console.log(`[Cron] restoreMilestonesAfterRestart: ${employee.name} (${employee.employeeId}) is STOPPED — skipping milestone restoration`);
+    return;
+  }
   if (!contacts) {
     console.warn(`[Cron] restoreMilestonesAfterRestart: no contacts for ${employee.name} — skipping`);
     return;
@@ -620,7 +624,11 @@ function scheduleRecruiterSheetPoller(employee, recruiterEmail, managerEmail, da
   };
 
   const check = async () => {
-    if (stopped) return;
+    if (stopped || employee.status === 'stopped' || employee.isStopped) {
+      stopped = true;
+      if (jobHandle) { try { jobHandle.stop(); } catch (_) {} }
+      return;
+    }
     if (isTaskDone(employee.checklist, partOneTaskId)) {
       stopped = true;
       if (jobHandle) { try { jobHandle.stop(); } catch (_) {} }
@@ -679,7 +687,11 @@ function scheduleManagerSheetReminder(employee, managerEmail, sheetUrl, label, s
   let stopped = false;
 
   const check = async () => {
-    if (stopped) return;
+    if (stopped || employee.status === 'stopped' || employee.isStopped) {
+      stopped = true;
+      if (jobHandle) { try { jobHandle.stop(); } catch (_) {} }
+      return;
+    }
     if (isTaskDone(employee.checklist, stopTaskId)) {
       stopped = true;
       if (jobHandle) { try { jobHandle.stop(); } catch (_) {} }

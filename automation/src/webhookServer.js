@@ -75,8 +75,9 @@ let _onNewEmployee = null;      // async (employeeData) => void
 
 let _cancelAllJobs = null; // injected by index.js
 let _saveState = null;     // injected by index.js
+let _stopEmployeeOnboarding = null; // injected by index.js
 
-function init({ auth, employeeRegistry, handleNewFile, handleReply, onNewEmployee, cancelAllJobs, saveState }) {
+function init({ auth, employeeRegistry, handleNewFile, handleReply, onNewEmployee, cancelAllJobs, saveState, stopEmployeeOnboarding }) {
   _auth = auth;
   _employeeRegistry = employeeRegistry;
   _handleNewFile = handleNewFile;
@@ -84,6 +85,7 @@ function init({ auth, employeeRegistry, handleNewFile, handleReply, onNewEmploye
   _onNewEmployee = onNewEmployee;
   _cancelAllJobs = cancelAllJobs || null;
   _saveState = saveState || null;
+  _stopEmployeeOnboarding = stopEmployeeOnboarding || null;
 }
 
 // Track last-seen file IDs per employee folder — persisted to seen-files.json
@@ -711,6 +713,16 @@ app.get('/status/:employeeId', statusLimiter, (req, res) => {
   const officialEmailBadge = t16Done && emp.officialEmail
     ? `&nbsp;|&nbsp; Official email: <strong>${emp.officialEmail}</strong>`
     : '';
+  const isStopped = emp.status === 'stopped' || emp.isStopped;
+  const stoppedBanner = isStopped
+    ? `<div style="background:#ffebee;color:#c62828;border:1px solid #ef9a9a;padding:12px 16px;border-radius:6px;margin-bottom:20px;font-weight:bold;">
+        ⛔ ONBOARDING STOPPED (Candidate Didn't Join) — ${esc(emp.statusReason || 'All automated notifications and cron jobs cancelled')}
+       </div>`
+    : '';
+
+  const stopBtn = !isStopped
+    ? `<button type="button" onclick="stopOnboarding('${emp.employeeId}')" style="float:right;background:#d32f2f;color:#fff;border:none;padding:8px 14px;border-radius:4px;cursor:pointer;font-weight:bold;font-size:13px;margin-top:-6px;">⛔ Stop Onboarding (Candidate Didn't Join)</button>`
+    : '';
 
   res.setHeader('Content-Type', 'text/html');
   res.send(`<!DOCTYPE html>
@@ -724,7 +736,7 @@ app.get('/status/:employeeId', statusLimiter, (req, res) => {
     h1{margin-bottom:4px;}
     .meta{color:#666;margin-bottom:24px;font-size:14px;}
     .progress-bar{background:#e0e0e0;border-radius:8px;height:20px;margin-bottom:8px;}
-    .progress-fill{background:#2e7d32;border-radius:8px;height:100%;transition:width .3s;}
+    .progress-fill{background:${isStopped ? '#9e9e9e' : '#2e7d32'};border-radius:8px;height:100%;transition:width .3s;}
     .pct{font-size:13px;color:#555;margin-bottom:24px;}
     table{width:100%;}
     h2{margin-top:32px;font-size:18px;border-bottom:1px solid #eee;padding-bottom:6px;}
@@ -733,10 +745,12 @@ app.get('/status/:employeeId', statusLimiter, (req, res) => {
 </head>
 <body>
   <div class="back"><a href="/status" style="color:#1a73e8;">&larr; All Employees</a></div>
+  ${stoppedBanner}
+  ${stopBtn}
   <h1>${esc(emp.name)}</h1>
   <div class="meta">ID: ${esc(emp.employeeId)} &nbsp;|&nbsp; DOJ: ${esc(emp.doj)} &nbsp;|&nbsp; ${esc(emp.personalEmail)}${officialEmailBadge}</div>
   <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
-  <div class="pct">${pct}% complete &mdash; ${done} of ${total} tasks done</div>
+  <div class="pct">${pct}% complete &mdash; ${done} of ${total} tasks done ${isStopped ? '(STOPPED)' : ''}</div>
   <h2>Checklist</h2>
   ${phaseRows}
   <h2>Activity Log</h2>
@@ -755,9 +769,48 @@ app.get('/status/:employeeId', statusLimiter, (req, res) => {
       }).then(r => r.json()).then(d => { alert(d.message || d.error); location.reload(); })
         .catch(() => alert('Request failed'));
     }
+    function stopOnboarding(empId) {
+      const reason = prompt('Reason for stopping onboarding (e.g. Candidate did not join / Stop case requested):', 'Candidate did not join');
+      if (reason === null) return;
+      if (!confirm('Are you sure you want to stop onboarding and cancel ALL automated emails and notifications for this candidate?')) return;
+      fetch('/employee/' + empId + '/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason })
+      }).then(r => r.json()).then(d => { alert(d.message || d.error); location.reload(); })
+        .catch(e => alert('Error: ' + e.message));
+    }
   </script>
 </body>
 </html>`);
+});
+
+// ─── Stop onboarding endpoint ────────────────────────────────────────────────
+// POST /employee/:employeeId/stop
+app.post('/employee/:employeeId/stop', async (req, res) => {
+  const { employeeId } = req.params;
+  if (!isValidEmployeeId(employeeId)) {
+    return res.status(400).json({ error: 'Invalid employeeId format.' });
+  }
+  const emp = _employeeRegistry[employeeId];
+  if (!emp) return res.status(404).json({ error: `Employee ${employeeId} not found.` });
+
+  const reason = (req.body && req.body.reason) || 'Candidate did not join / Stop case requested';
+  try {
+    if (_stopEmployeeOnboarding) {
+      await _stopEmployeeOnboarding(emp, reason);
+    } else {
+      emp.status = 'stopped';
+      emp.statusReason = reason;
+      emp.isStopped = true;
+      if (_cancelAllJobs) _cancelAllJobs(employeeId);
+      if (_saveState) _saveState(employeeId, emp);
+    }
+    res.json({ ok: true, message: `Onboarding stopped and all notifications cancelled for ${emp.name}` });
+  } catch (err) {
+    console.error(`[Webhook] Error stopping onboarding for ${employeeId}:`, err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── All-employees dashboard ───────────────────────────────────────────────────

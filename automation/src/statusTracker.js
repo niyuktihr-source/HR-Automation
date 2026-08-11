@@ -342,6 +342,12 @@ async function markPreprobationDone(auth, employee) {
   await revokeEmployeeSheetAccess(auth, employee);
 }
 
+async function markOnboardingStopped(auth, employee, reason) {
+  const note = `STOPPED — ${reason || 'Candidate did not join'}`;
+  // Mark milestone 0 as NOT_OK / ACTION_REQ with note
+  await updateMilestone(auth, employee, 0, STATUS.NOT_OK, note);
+}
+
 // Revoke the employee's view access to their status sheet once onboarding is fully complete
 async function revokeEmployeeSheetAccess(auth, employee) {
   const spreadsheetId = employee.statusSheetId;
@@ -425,6 +431,7 @@ module.exports = {
   mark60DayDone,
   mark90DayDone,
   markPreprobationDone,
+  markOnboardingStopped,
   revokeEmployeeSheetAccess,
   renameStatusSheet,
   createProjectIntroSheet,
