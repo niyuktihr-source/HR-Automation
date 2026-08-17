@@ -166,6 +166,17 @@ function schedule25DayCatchup(employee, markTaskFn) {
     const { send25DayCatchupEmail } = require('./emailSender');
     const { mark25DayCatchupDone } = require('./statusTracker');
 
+    // Create calendar invite for joinee + recruiter + manager
+    if (employee._auth) {
+      const link = await create25DayCatchupEvent(employee._auth, employee).catch(err => {
+        console.error(`[Cron][Calendar] ❌ 25-day calendar invite FAILED for ${name} (${employeeId}): ${err.message}`);
+        return null;
+      });
+      if (link) console.log(`[Cron][Calendar] ✅ 25-day calendar invite sent for ${name}: ${link}`);
+    } else {
+      console.warn(`[Cron][Calendar] ⚠️ 25-day calendar invite SKIPPED for ${name} — no auth on employee object`);
+    }
+
     await send25DayCatchupEmail(employee).catch(err =>
       console.warn(`[Cron] 25-day catchup email failed for ${name}: ${err.message}`)
     );
@@ -192,9 +203,15 @@ function schedule30DayCatchup(employee, recruiterEmail, managerEmail, contacts, 
   scheduleDayBeforeReminder(employee, 30, fireDate);
 
   return scheduleOnce(fireDate, `30-Day Catchup — ${name}`, async () => {
-    if (employee._auth) await create30DayCatchupEvent(employee._auth, employee).catch(err =>
-      console.warn(`[Cron] 30-day calendar event failed for ${name} — email still sent. (${err.message})`)
-    );
+    if (employee._auth) {
+      const link = await create30DayCatchupEvent(employee._auth, employee).catch(err => {
+        console.error(`[Cron][Calendar] ❌ 30-day calendar invite FAILED for ${name} (${employeeId}): ${err.message}`);
+        return null;
+      });
+      if (link) console.log(`[Cron][Calendar] ✅ 30-day calendar invite sent for ${name}: ${link}`);
+    } else {
+      console.warn(`[Cron][Calendar] ⚠️ 30-day calendar invite SKIPPED for ${name} — no auth on employee object`);
+    }
 
     // Part 1: send review email to manager + joinee, then poll sheet daily until recruiter fills it
     const { send30DayTechnicalReview } = require('./emailSender');
@@ -228,9 +245,15 @@ function schedule60DayReview(employee, recruiterEmail, managerEmail, contacts, m
   return scheduleOnce(fireDate, `60-Day Review — ${name}`, async () => {
     await sendPeriodicReviewReminder(employee, recruiterEmail, managerEmail, 60);
     console.log(`[Cron] 60-day review reminder sent for ${name} (${employeeId})`);
-    if (employee._auth) await createReviewEvent(employee._auth, employee, 60).catch(err =>
-      console.warn(`[Cron] 60-day calendar event failed for ${name} — email still sent. (${err.message})`)
-    );
+    if (employee._auth) {
+      const link = await createReviewEvent(employee._auth, employee, 60).catch(err => {
+        console.error(`[Cron][Calendar] ❌ 60-day calendar invite FAILED for ${name} (${employeeId}): ${err.message}`);
+        return null;
+      });
+      if (link) console.log(`[Cron][Calendar] ✅ 60-day calendar invite sent for ${name}: ${link}`);
+    } else {
+      console.warn(`[Cron][Calendar] ⚠️ 60-day calendar invite SKIPPED for ${name} — no auth on employee object`);
+    }
 
     // Mark all three 60-day phase tasks done immediately so the master dashboard
     // goes green as soon as the review email is sent.
@@ -256,9 +279,15 @@ function schedule90DayReview(employee, recruiterEmail, managerEmail, contacts, m
   return scheduleOnce(fireDate, `90-Day Review — ${name}`, async () => {
     await sendPeriodicReviewReminder(employee, recruiterEmail, managerEmail, 90);
     console.log(`[Cron] 90-day review reminder sent for ${name} (${employeeId})`);
-    if (employee._auth) await createReviewEvent(employee._auth, employee, 90).catch(err =>
-      console.warn(`[Cron] 90-day calendar event failed for ${name} — email still sent. (${err.message})`)
-    );
+    if (employee._auth) {
+      const link = await createReviewEvent(employee._auth, employee, 90).catch(err => {
+        console.error(`[Cron][Calendar] ❌ 90-day calendar invite FAILED for ${name} (${employeeId}): ${err.message}`);
+        return null;
+      });
+      if (link) console.log(`[Cron][Calendar] ✅ 90-day calendar invite sent for ${name}: ${link}`);
+    } else {
+      console.warn(`[Cron][Calendar] ⚠️ 90-day calendar invite SKIPPED for ${name} — no auth on employee object`);
+    }
 
     // Mark all three 90-day phase tasks done immediately so the master dashboard
     // goes green as soon as the review email is sent.
