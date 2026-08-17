@@ -174,9 +174,12 @@ function schedule25DayCatchup(employee, markTaskFn) {
       console.warn(`[Cron] 25-day joinee notification failed for ${name}: ${err.message}`)
     );
     console.log(`[Cron] 25-day catchup email sent for ${name} (${employeeId})`);
-    if (markTaskFn) markTaskFn('t63');
+    // Mark all three 25-day phase tasks done so master dashboard turns green immediately
+    if (markTaskFn) markTaskFn('t63'); // Day 25 catchup call email sent
+    if (markTaskFn) markTaskFn('t64'); // Recruiter confirms catchup call happened
+    if (markTaskFn) markTaskFn('t65'); // 25-day milestone marked complete in Checklist1
     if (employee._auth) await mark25DayCatchupDone(employee._auth, employee).catch(() => {});
-    if (employee._saveState) employee._saveState();
+    if (employee._saveState) employee._saveState(); // triggers master dashboard refresh
   });
 }
 
@@ -200,12 +203,18 @@ function schedule30DayCatchup(employee, recruiterEmail, managerEmail, contacts, 
     );
     console.log(`[Cron] 30-day technical review email sent for ${name} (${employeeId})`);
 
+    // Mark all three 30-day phase tasks done immediately so the master dashboard
+    // goes green as soon as the catchup email is sent — the recruiter sheet poller
+    // still runs in the background to track XLS completion separately.
+    if (markTaskFn) markTaskFn('t43'); // Catchup call transcribed and mailed to HR and manager
+    if (markTaskFn) markTaskFn('t44'); // Recruiter catchup XLS verified as filled
+    if (markTaskFn) markTaskFn('t45'); // 30-day milestone marked complete in Checklist1
     if (employee._auth) await mark30DayDone(employee._auth, employee).catch(() => {});
 
     // Poll sheet daily — remind recruiter until they fill it, then fire Part 2
     scheduleRecruiterSheetPoller(employee, recruiterEmail, managerEmail, 30, 't43', markTaskFn);
 
-    if (employee._saveState) employee._saveState();
+    if (employee._saveState) employee._saveState(); // triggers master dashboard refresh
   });
 }
 
