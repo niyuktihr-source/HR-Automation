@@ -232,12 +232,17 @@ function schedule60DayReview(employee, recruiterEmail, managerEmail, contacts, m
       console.warn(`[Cron] 60-day calendar event failed for ${name} — email still sent. (${err.message})`)
     );
 
+    // Mark all three 60-day phase tasks done immediately so the master dashboard
+    // goes green as soon as the review email is sent.
+    if (markTaskFn) markTaskFn('t46'); // Call between recruiter and manager transcribed and sheet updated
+    if (markTaskFn) markTaskFn('t47'); // Call did not happen — reminder sent to reschedule
+    if (markTaskFn) markTaskFn('t48'); // 60-day milestone marked complete in Checklist1
     if (employee._auth) await mark60DayDone(employee._auth, employee).catch(() => {});
 
     // Poll sheet daily — remind recruiter until they fill it, then fire Part 2
     scheduleRecruiterSheetPoller(employee, recruiterEmail, managerEmail, 60, 't46', markTaskFn);
 
-    if (employee._saveState) employee._saveState();
+    if (employee._saveState) employee._saveState(); // triggers master dashboard refresh
   });
 }
 
@@ -255,12 +260,17 @@ function schedule90DayReview(employee, recruiterEmail, managerEmail, contacts, m
       console.warn(`[Cron] 90-day calendar event failed for ${name} — email still sent. (${err.message})`)
     );
 
+    // Mark all three 90-day phase tasks done immediately so the master dashboard
+    // goes green as soon as the review email is sent.
+    if (markTaskFn) markTaskFn('t49'); // Call between recruiter and manager transcribed and sheet updated
+    if (markTaskFn) markTaskFn('t50'); // Call did not happen — reminder sent to reschedule
+    if (markTaskFn) markTaskFn('t51'); // 90-day milestone marked complete in Checklist1
     if (employee._auth) await mark90DayDone(employee._auth, employee).catch(() => {});
 
     // Poll sheet daily — remind recruiter until they fill it, then fire Part 2
     scheduleRecruiterSheetPoller(employee, recruiterEmail, managerEmail, 90, 't49', markTaskFn);
 
-    if (employee._saveState) employee._saveState();
+    if (employee._saveState) employee._saveState(); // triggers master dashboard refresh
   });
 }
 
