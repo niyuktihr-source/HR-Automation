@@ -21,6 +21,24 @@ function ensureWorkingDay(date) {
   return d;
 }
 
+// If the intended event date is in the past (cron fired late due to restart/OAuth expiry),
+// bump to the next working day from today so the invite is still actionable.
+// Returns { date, wasRescheduled, originalDate }
+function resolveEventDate(intendedDate) {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()); // midnight local
+  const intended = new Date(intendedDate);
+  const intendedDay = new Date(intended.getFullYear(), intended.getMonth(), intended.getDate());
+
+  if (intendedDay >= today) {
+    return { date: intended, wasRescheduled: false, originalDate: intended };
+  }
+
+  // Date is in the past — schedule for next working day from today
+  const rescheduled = ensureWorkingDay(addDays(today, 1));
+  return { date: rescheduled, wasRescheduled: true, originalDate: intended };
+}
+
 // Returns { dateTime, timeZone } for Google Calendar API in IST
 function toGoogleDateTime(date, hour, minute) {
   // Build an ISO string with the IST offset +05:30
@@ -196,7 +214,12 @@ async function create25DayCatchupEvent(auth, employee) {
       console.error(`[Calendar] create25DayCatchupEvent: invalid DOJ "${employee.doj}" for ${employee.name}`);
       return null;
     }
-    const eventDate = ensureWorkingDay(addDays(dojDate, config.milestones.surveyday));
+    const { date: eventDate, wasRescheduled, originalDate } = resolveEventDate(
+      ensureWorkingDay(addDays(dojDate, config.milestones.surveyday))
+    );
+    if (wasRescheduled) {
+      console.warn(`[Calendar] 25-day catchup for ${employee.name} was in the past (${originalDate.toDateString()}) — rescheduling invite to ${eventDate.toDateString()}`);
+    }
 
     const attendees = [
       employee.officialEmail || employee.personalEmail,
@@ -208,9 +231,15 @@ async function create25DayCatchupEvent(auth, employee) {
 
     const cfg = config.calendarEvents.catchup25day;
     const endMins = cfg.minute + cfg.durationMins;
+    const summary = wasRescheduled
+      ? `25-Day Catchup ⚠️ (Rescheduled) — ${employee.name}`
+      : `25-Day Catchup — ${employee.name}`;
+    const description = wasRescheduled
+      ? `25-day onboarding catchup call for ${employee.name} (${employee.employeeId}).\n\n⚠️ This meeting was originally scheduled for ${originalDate.toDateString()} and has been rescheduled.\n\nAgenda:\n• Onboarding experience so far\n• Any challenges or blockers\n• Role clarity check\n• Initial feedback from the team`
+      : `25-day onboarding catchup call for ${employee.name} (${employee.employeeId}).\n\nAgenda:\n• Onboarding experience so far\n• Any challenges or blockers\n• Role clarity check\n• Initial feedback from the team`;
     const event = {
-      summary: `25-Day Catchup — ${employee.name}`,
-      description: `25-day onboarding catchup call for ${employee.name} (${employee.employeeId}).\n\nAgenda:\n• Onboarding experience so far\n• Any challenges or blockers\n• Role clarity check\n• Initial feedback from the team`,
+      summary,
+      description,
       start: toGoogleDateTime(eventDate, cfg.hour, cfg.minute),
       end: toGoogleDateTime(eventDate, cfg.hour + Math.floor(endMins / 60), endMins % 60),
       attendees,
@@ -244,7 +273,12 @@ async function create30DayCatchupEvent(auth, employee) {
       console.error(`[Calendar] create30DayCatchupEvent: invalid DOJ "${employee.doj}" for ${employee.name}`);
       return null;
     }
-    const eventDate = ensureWorkingDay(addDays(dojDate, config.milestones.catchup30day));
+    const { date: eventDate, wasRescheduled, originalDate } = resolveEventDate(
+      ensureWorkingDay(addDays(dojDate, config.milestones.catchup30day))
+    );
+    if (wasRescheduled) {
+      console.warn(`[Calendar] 30-day catchup for ${employee.name} was in the past (${originalDate.toDateString()}) — rescheduling invite to ${eventDate.toDateString()}`);
+    }
 
     const attendees = [
       employee.officialEmail || employee.personalEmail,
@@ -256,9 +290,15 @@ async function create30DayCatchupEvent(auth, employee) {
 
     const cfg = config.calendarEvents.catchup30day;
     const endMins = cfg.minute + cfg.durationMins;
+    const summary = wasRescheduled
+      ? `30-Day Catchup ⚠️ (Rescheduled) — ${employee.name}`
+      : `30-Day Catchup — ${employee.name}`;
+    const description = wasRescheduled
+      ? `30-day catchup call for ${employee.name} (${employee.employeeId}).\n\n⚠️ This meeting was originally scheduled for ${originalDate.toDateString()} and has been rescheduled.\n\nCovers onboarding experience, role clarity, challenges, and initial performance feedback.`
+      : `30-day catchup call for ${employee.name} (${employee.employeeId}). Covers onboarding experience, role clarity, challenges, and initial performance feedback.`;
     const event = {
-      summary: `30-Day Catchup — ${employee.name}`,
-      description: `30-day catchup call for ${employee.name} (${employee.employeeId}). Covers onboarding experience, role clarity, challenges, and initial performance feedback.`,
+      summary,
+      description,
       start: toGoogleDateTime(eventDate, cfg.hour, cfg.minute),
       end: toGoogleDateTime(eventDate, cfg.hour + Math.floor(endMins / 60), endMins % 60),
       attendees,
@@ -293,7 +333,12 @@ async function createReviewEvent(auth, employee, dayMark) {
       console.error(`[Calendar] createReviewEvent (${dayMark}-day): invalid DOJ "${employee.doj}" for ${employee.name}`);
       return null;
     }
-    const eventDate = ensureWorkingDay(addDays(dojDate, dayMark));
+    const { date: eventDate, wasRescheduled, originalDate } = resolveEventDate(
+      ensureWorkingDay(addDays(dojDate, dayMark))
+    );
+    if (wasRescheduled) {
+      console.warn(`[Calendar] ${dayMark}-day review for ${employee.name} was in the past (${originalDate.toDateString()}) — rescheduling invite to ${eventDate.toDateString()}`);
+    }
 
     const attendees = [
       employee.officialEmail || employee.personalEmail,
@@ -305,9 +350,15 @@ async function createReviewEvent(auth, employee, dayMark) {
 
     const cfg = config.calendarEvents.reviewMeeting;
     const endMins = cfg.minute + cfg.durationMins;
+    const summary = wasRescheduled
+      ? `${dayMark}-Day Review ⚠️ (Rescheduled) — ${employee.name}`
+      : `${dayMark}-Day Review — ${employee.name}`;
+    const description = wasRescheduled
+      ? `${dayMark}-day performance review for ${employee.name} (${employee.employeeId}).\n\n⚠️ Originally scheduled for ${originalDate.toDateString()} — rescheduled due to a system restart.\n\nCovers performance assessment, key achievements, areas of improvement, and next goals.`
+      : `${dayMark}-day performance review for ${employee.name} (${employee.employeeId}). Covers performance assessment, key achievements, areas of improvement, and next goals.`;
     const event = {
-      summary: `${dayMark}-Day Review — ${employee.name}`,
-      description: `${dayMark}-day performance review for ${employee.name} (${employee.employeeId}). Covers performance assessment, key achievements, areas of improvement, and next goals.`,
+      summary,
+      description,
       start: toGoogleDateTime(eventDate, cfg.hour, cfg.minute),
       end: toGoogleDateTime(eventDate, cfg.hour + Math.floor(endMins / 60), endMins % 60),
       attendees,
