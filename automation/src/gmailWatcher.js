@@ -355,18 +355,31 @@ async function processGmailPush(auth, pushData, onReplyClassified) {
       const full = await fetchMessageBody(auth, msg.id);
 
       // ── STOP automation command — deterministic, no Gemini needed ────────────
-      // Protocol: hr@alethea.in  →  niyukti.hr@aletheatech.com
-      //           Subject: STOP automation <EMPLOYEE_ID>
+      // Authorized sender: hr@alethea.in
+      // Subject can be in any natural form — all of the following work:
+      //   "EMP0475 STOP ONBOARDING"
+      //   "STOP ONBOARDING EMP0475"
+      //   "EMP0475 no join"
+      //   "stop case EMP0475"
+      //   "cancel onboarding EMP0475"
+      //   "EMP0475 candidate did not join"
       // This fires BEFORE Gemini so it is instant, reliable, and costs no quota.
       const STOP_AUTHORIZED_SENDER = 'hr@alethea.in';
-      const stopSubjectMatch = full.subject.match(/^STOP\s+automation\s+([A-Z0-9]+)\s*$/i);
+      const STOP_KEYWORDS = /\b(stop|cancel|no.?join|did.?not.?join|not.?joining|drop(?:ped)?(?:.?out)?|withdraw|left|induction.?stop|stop.?case|stop.?onboarding|onboarding.?stop)\b/i;
+      // Extract employee ID (EMP followed by alphanumerics) from subject or body
+      const subjectAndBody = full.subject + ' ' + (full.body || '');
+      const empIdMatch = subjectAndBody.match(/\bEMP[A-Z0-9]+\b/i);
       const fromRaw = full.from || '';
       const fromEmail = fromRaw.toLowerCase().replace(/.*<([^>]+)>.*/, '$1').trim()
                         || fromRaw.toLowerCase().trim();
 
-      if (stopSubjectMatch && fromEmail === STOP_AUTHORIZED_SENDER) {
-        const empId = stopSubjectMatch[1].toUpperCase();
-        console.log(`[Gmail] ⛔ STOP automation command received — Employee: ${empId}, Sender: ${fromEmail}`);
+      const isStopEmail = fromEmail === STOP_AUTHORIZED_SENDER
+                          && STOP_KEYWORDS.test(full.subject)
+                          && empIdMatch;
+
+      if (isStopEmail) {
+        const empId = empIdMatch[0].toUpperCase();
+        console.log(`[Gmail] ⛔ Stop onboarding email detected — Employee: ${empId}, Sender: ${fromEmail}, Subject: "${full.subject}"`);
         await markAsRead(auth, msg.id).catch(() => {});
         await onReplyClassified(
           {
