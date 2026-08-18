@@ -336,7 +336,47 @@ async function processGmailPush(auth, pushData, onReplyClassified) {
 
   const { historyId } = decoded;
   if (!historyId) {
-    console.warn('[Gmail] Push payload missing historyId — skipping');
+    // historyId can be absent in some Pub/Sub delivery edge cases.
+    // Fall back to scanning recent unread messages so replies are never silently dropped.
+    console.warn('[Gmail] Push payload missing historyId — falling back to recent unread scan');
+    const gmail = google.gmail({ version: 'v1', auth });
+    let fallbackMessages = [];
+    try {
+      const res = await gmail.users.messages.list({
+        userId: 'me',
+        q: 'is:unread in:inbox',
+        maxResults: 20,
+      });
+      fallbackMessages = res.data.messages || [];
+    } catch (err) {
+      console.error('[Gmail] Fallback unread scan failed:', err.message);
+      return;
+    }
+    console.log(`[Gmail] Fallback scan found ${fallbackMessages.length} unread message(s)`);
+
+    for (const msg of fallbackMessages) {
+      if (processedMessageIds.has(msg.id) || processingLocks.has(msg.id)) {
+        console.log(`[Gmail] Skipping already-processed message ${msg.id}`);
+        continue;
+      }
+      processedMessageIds.add(msg.id);
+      processingLocks.add(msg.id);
+      try {
+        const full = await fetchMessageBody(auth, msg.id);
+        const classified = await classifyReply(full);
+        if (classified && classified.confidence !== 'low') {
+          await onReplyClassified(classified, full);
+          await markAsRead(auth, msg.id);
+        } else if (classified && classified.confidence === 'low') {
+          await markAsRead(auth, msg.id).catch(() => {});
+        }
+      } catch (err) {
+        console.error(`[Gmail] Fallback: error processing message ${msg.id}:`, err.message);
+      } finally {
+        processingLocks.delete(msg.id);
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
     return;
   }
   console.log(`[Gmail] Push received — historyId: ${historyId}`);
