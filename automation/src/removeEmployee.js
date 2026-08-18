@@ -75,6 +75,31 @@ async function main() {
   fs.writeFileSync(EMPLOYEES_PATH, JSON.stringify(employees, null, 2));
   console.log(`Removed ${emp.name} from employees.json`);
 
+  // Call the live engine to stop in-memory timers before touching files.
+  // If the engine isn't running this will fail silently — that's fine.
+  const port = process.env.WEBHOOK_PORT || 3000;
+  await new Promise(resolve => {
+    const http = require('http');
+    const reqData = JSON.stringify({ reason: 'Employee removed via remove-employee CLI' });
+    const req = http.request({
+      hostname: 'localhost',
+      port,
+      path: `/employee/${encodeURIComponent(id)}/stop`,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(reqData) },
+    }, res => {
+      if (res.statusCode === 200) console.log(`[Engine] Live engine stopped timers for ${id}`);
+      else console.log(`[Engine] Engine returned ${res.statusCode} for stop request — state file will be marked stopped directly`);
+      resolve();
+    });
+    req.on('error', () => {
+      console.log(`[Engine] Engine not running on port ${port} — will mark state file stopped directly`);
+      resolve();
+    });
+    req.write(reqData);
+    req.end();
+  });
+
   // Delete status sheet from Google Drive (read fileId from state before deleting state file)
   const stateFile = path.join(STATE_DIR, `state-${id}.json`);
   if (fs.existsSync(stateFile)) {

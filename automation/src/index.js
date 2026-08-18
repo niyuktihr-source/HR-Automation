@@ -1723,6 +1723,14 @@ async function onboardEmployee(auth, employee) {
   employee._markTask = (taskId) => markAndLog(employee, taskId);
   employee._saveState = () => saveState(employee.employeeId, snapshotEmployee(employee));
 
+  // ── Guard: skip all automation for stopped employees ──────────────────────
+  // isStopped is set by stopEmployeeOnboarding() or via the STOP email command.
+  // On restart, this prevents re-firing emails for candidates who did not join.
+  if (employee.status === 'stopped' || employee.isStopped) {
+    console.log(`[Index] ⛔ ${employee.name} (${employee.employeeId}) is STOPPED — skipping all automation. Data preserved.`);
+    return;
+  }
+
   // Restore reply-deadline timers that were active before restart.
   // Each entry is { expiresAt, recipientEmail } — use the stored recipient so
   // escalations go to the right person (manager, IT, recruiter) not just HR.
@@ -2262,6 +2270,24 @@ async function main() {
       }
 
       const saved = loadState(employee.employeeId);
+
+      // ── Guard: skip stopped employees on restart ────────────────────────────
+      // If the state file was marked stopped (via email command, dashboard, or CLI),
+      // do NOT re-onboard them. Their data and state file are preserved.
+      if (saved && (saved.status === 'stopped' || saved.isStopped)) {
+        console.log(`[Index] ⛔ Skipping ${employee.name} (${employee.employeeId}) — marked as STOPPED in state file. All automation suppressed.`);
+        // Still register in memory so the dashboard and /employee/:id endpoints work
+        const stoppedEmp = {
+          ...employee,
+          ...saved,
+          processedFileIds: new Set(saved.processedFileIds || []),
+          noResponseTimers: {},
+          replyTimers: {},
+        };
+        employeeRegistry[employee.employeeId] = stoppedEmp;
+        continue;
+      }
+
       if (!employee.checklist) employee.checklist = saved ? saved.checklist : buildDefaultChecklist();
       migrateChecklist(employee.checklist);
       if (!employee.statusSheetId && saved && saved.statusSheetId) employee.statusSheetId = saved.statusSheetId;

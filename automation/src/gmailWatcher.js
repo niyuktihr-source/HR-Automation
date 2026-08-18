@@ -353,6 +353,40 @@ async function processGmailPush(auth, pushData, onReplyClassified) {
     processingLocks.add(msg.id);
     try {
       const full = await fetchMessageBody(auth, msg.id);
+
+      // ── STOP automation command — deterministic, no Gemini needed ────────────
+      // Protocol: hr@alethea.in  →  niyukti.hr@aletheatech.com
+      //           Subject: STOP automation <EMPLOYEE_ID>
+      // This fires BEFORE Gemini so it is instant, reliable, and costs no quota.
+      const STOP_AUTHORIZED_SENDER = 'hr@alethea.in';
+      const stopSubjectMatch = full.subject.match(/^STOP\s+automation\s+([A-Z0-9]+)\s*$/i);
+      const fromRaw = full.from || '';
+      const fromEmail = fromRaw.toLowerCase().replace(/.*<([^>]+)>.*/, '$1').trim()
+                        || fromRaw.toLowerCase().trim();
+
+      if (stopSubjectMatch && fromEmail === STOP_AUTHORIZED_SENDER) {
+        const empId = stopSubjectMatch[1].toUpperCase();
+        console.log(`[Gmail] ⛔ STOP automation command received — Employee: ${empId}, Sender: ${fromEmail}`);
+        await markAsRead(auth, msg.id).catch(() => {});
+        await onReplyClassified(
+          {
+            isOnboardingReply: true,
+            replyType: 'candidate_no_join',
+            employeeId: empId,
+            data: {
+              notes: `STOP automation command received via email from ${fromEmail} — Subject: "${full.subject}"`,
+            },
+            confidence: 'high',
+          },
+          full
+        );
+        // Skip Gemini classification for this message — already handled above
+        processingLocks.delete(msg.id);
+        await new Promise(r => setTimeout(r, 500));
+        continue;
+      }
+      // ─────────────────────────────────────────────────────────────────────────
+
       const classified = await classifyReply(full);
       if (classified && classified.confidence === 'low') {
         console.warn(`[Gmail] Low-confidence reply dropped — from: ${full.from}, subject: ${full.subject}`);
