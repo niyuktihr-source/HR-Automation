@@ -30,20 +30,32 @@ function getTransporter() {
 }
 
 // Send via nodemailer + Gmail App Password
+// Every outgoing email is automatically CC'd to AUDIT_CC_EMAIL (default: hr@alethea.in)
+// so HR can trace all automation activity from one inbox.
+// Set AUDIT_CC_EMAIL= (empty) in .env to disable the audit CC.
 async function sendEmail({ to, subject, html }, retries = 3) {
   const sender = process.env.GMAIL_USER;
   const fromName = process.env.COMPANY_NAME ? `${process.env.COMPANY_NAME} HR` : 'HR Team';
 
+  // Audit CC — skip if the recipient already includes this address
+  const auditCc = process.env.AUDIT_CC_EMAIL !== undefined
+    ? process.env.AUDIT_CC_EMAIL          // explicit env (can be '' to disable)
+    : 'hr@alethea.in';                    // default
+  const toAddresses = String(to || '').toLowerCase();
+  const cc = auditCc && !toAddresses.includes(auditCc.toLowerCase()) ? auditCc : undefined;
+
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       const transporter = getTransporter();
-      const info = await transporter.sendMail({
+      const mailOpts = {
         from: `"${fromName}" <${sender}>`,
         to,
         subject,
         html,
-      });
-      console.log(`[Email] Sent to ${to} — ${subject} (${info.messageId})`);
+      };
+      if (cc) mailOpts.cc = cc;
+      const info = await transporter.sendMail(mailOpts);
+      console.log(`[Email] Sent to ${to}${cc ? ` (CC: ${cc})` : ''} — ${subject} (${info.messageId})`);
       return info;
     } catch (err) {
       if (attempt === retries) {
