@@ -1132,6 +1132,27 @@ Respond ONLY with this exact JSON (no extra text):
     `,
   }).catch(err => console.warn(`[BGV] Notification email failed: ${err.message}`));
 
+  // ── If BGV is Green — also notify the recruiter so they can proceed ────────
+  if (isGreen) {
+    const recruiterEmail = employee.contacts && employee.contacts.recruiterEmail;
+    if (recruiterEmail) {
+      await sendEmail({
+        to: recruiterEmail,
+        subject: `✅ BGV Cleared — ${employee.name} (${employee.employeeId})`,
+        html: `
+          <p>Hi,</p>
+          <p>The Background Verification (BGV) for <strong>${employee.name}</strong> (Employee ID: ${employee.employeeId}) has been completed and the result is:</p>
+          <p style="font-size:16px;font-weight:bold;color:#2e7d32;background:#e8f5e9;display:inline-block;padding:6px 14px;border-radius:4px;">&#9989; Verified (Green)</p>
+          <table style="margin:8px 0;font-size:14px;"><tr><td style="padding:2px 8px 2px 0;color:#555;">SSID:</td><td><strong>${ssid}</strong></td></tr></table>
+          <p>${bgvResult.summary || 'All checks have passed. Onboarding can proceed without any BGV concerns.'}</p>
+          <p style="color:#2e7d32;font-weight:bold;">No action required from your end — the onboarding checklist has been updated automatically.</p>
+          <p>Regards,<br/>${process.env.COMPANY_NAME} HR Automation</p>
+        `,
+      }).catch(err => console.warn(`[BGV] Recruiter Green notification failed: ${err.message}`));
+      console.log(`[BGV] ✅ Recruiter notified of Green BGV for ${employee.name} → ${recruiterEmail}`);
+    }
+  }
+
   // ── Update checklist based on traffic-light result ────────────────────────
   markAndLog(employee, 't25'); // Recruiter responded with BGV report
 
