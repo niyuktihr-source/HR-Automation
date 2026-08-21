@@ -221,6 +221,32 @@ async function classifyReply(message) {
   const hasAttachment = message.attachments && message.attachments.length > 0;
   if (!message.body && !hasAttachment) return null;
 
+  // ── Deterministic BGV shortcut — bypass Gemini entirely ──────────────────
+  // If a PDF attachment has a BGV-vendor filename, it IS a bgv_report.
+  // This prevents Gemini from being confused by forwarding body text like
+  // "Kindly upload the BGV report" even when the PDF is right there attached.
+  const BGV_FILENAME_PATTERNS = /smartscreen|bgv|background.?verif|supersoft/i;
+  if (hasAttachment) {
+    const bgvPdf = message.attachments.find(a =>
+      a.filename && a.filename.toLowerCase().endsWith('.pdf') &&
+      BGV_FILENAME_PATTERNS.test(a.filename)
+    );
+    if (bgvPdf) {
+      // Extract employee ID from subject (format: EMP followed by alphanumerics)
+      const empIdMatch = (message.subject || '').match(/\bEMP[A-Z0-9]+\b/i);
+      const employeeId = empIdMatch ? empIdMatch[0].toUpperCase() : null;
+      console.log(`[Gmail] ✅ Deterministic BGV PDF detected (${bgvPdf.filename}) — bypassing Gemini, classifying as bgv_report (employee: ${employeeId || 'unknown'})`);
+      return {
+        isOnboardingReply: true,
+        replyType: 'bgv_report',
+        employeeId,
+        data: { bgvStatus: null, notes: `Auto-detected from attachment: ${bgvPdf.filename}` },
+        confidence: 'high',
+      };
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   const genAI = getGenAI();
   if (!genAI) {
     console.warn('[Gmail] GEMINI_API_KEY not set — reply classification skipped. Replies must be processed manually.');
@@ -245,8 +271,8 @@ Reply type definitions — use the email SUBJECT as the primary signal, then bod
 - "official_email_access_confirmed": Reply from the employee confirming their official email works — subject contains "Confirm Access" or "Official Email" and body contains "confirmed", "working", "yes" or similar positive acknowledgement
 - "official_email_access_failed": Reply from the employee saying their official email is NOT working — body contains "not working", "issue", "can't login", "problem", "error" or similar negative response
 - "manager_allocation": Reply to an "Asset & Seat Allocation" request sent TO a MANAGER — contains supervisor name, office location, asset type. This is the MANAGER confirming allocation plans BEFORE joining. Subject will contain "Asset & Seat Allocation".
-- "it_allocation": Reply to an "IT Asset" request sent TO the IT TEAM — IT confirms assets are physically ready/handed over. Subject will contain "IT Asset" or "IT Team". This happens AFTER manager_allocation.
-- "bgv_report": Reply to a BGV initiation request — HR/recruiter replying with a SmartScreen or Supersoft BGV vendor PDF attached, OR forwarding the vendor report. Subject will contain "BGV" or "Background Verification" or "Initiate BGV". Classify as bgv_report if the subject mentions BGV/Background Verification AND there is a PDF in ATTACHMENTS, even if the body is brief or just "Please find attached". Also classify as bgv_report if the ATTACHMENTS field contains a PDF whose filename looks like a BGV report (e.g. contains "BGV", "background", "smartscreen", "report").
+- "it_allocation": Reply to an "IT Asset" request sent TO the IT TEAM — IT confirms assets are physically ready/handed over. Subject will contain "IT Asset" or "IT Team" or "IT Asset Setup Required". This happens AFTER manager_allocation. Also classify as it_allocation if IT sends a fresh email (not a reply) confirming assets are ready for the employee — look for phrases like "asset assigned", "asset ready", "laptop ready", "system ready" addressed to HR.
+- "bgv_report": Reply to a BGV initiation request — HR/recruiter replying with a SmartScreen or Supersoft BGV vendor PDF attached, OR forwarding the vendor report. REQUIRES a PDF in ATTACHMENTS — do NOT classify as bgv_report if ATTACHMENTS is "none" or empty. Subject will contain "BGV" or "Background Verification" or "Initiate BGV". THE ATTACHMENT IS THE PRIMARY SIGNAL: if ATTACHMENTS contains a PDF whose filename contains "bgv", "background", "smartscreen", or "report", classify as bgv_report even if the body text sounds like a reminder or forwarding message (e.g. "Hi, kindly upload the BGV report", "Please find attached", "FYI"). Many HR people forward the vendor report with a brief note — the PDF presence confirms this is the actual submission. A text-only reply with NO attachment is NOT a bgv_report — classify those as "unknown".
 - "induction_confirmed": Reply confirming HR induction meeting attendance or completion
 - "admin_allocation": Reply from Admin confirming physical seat or access card allocation
 - "meeting_time_preference": New joinee replies to the welcome email with preferred meeting times — subject contains "Pre-Onboarding Form" and body mentions times for induction or project intro
@@ -259,7 +285,7 @@ Reply type definitions — use the email SUBJECT as the primary signal, then bod
 - "candidate_no_join": Email from HR, recruiter, manager or joinee indicating the candidate did not join, has dropped out, or requesting to stop the onboarding / induction / notifications — subject or body contains phrases like "candidate not join", "did not join", "candidate not joined", "stop case", "induction stop case", "stop onboarding", "cancel case", "stop notification", "no join", "candidate left", "dropped out" or similar request. Extract any reason provided into data.notes.
 - "unknown": Related to onboarding but does not clearly match any above type
 
-IMPORTANT: If subject or body indicates candidate did not join, stop case, induction stop case, or candidate left → classify as "candidate_no_join" and set isOnboardingReply=true. If FROM contains "greythr" OR body contains "greythr.com" or "self-service account" or "payslips" and "leaves" → classify as "greythr_welcome" and extract the joinee name from the greeting line into data.notes. If the subject contains "Pre-Onboarding Form" and the body mentions preferred times for meetings → classify as "meeting_time_preference" and extract inductionTime and projectIntroTime into data. If the subject contains "Asset & Seat Allocation" → classify as "manager_allocation". If subject contains "IT Asset" → classify as "it_allocation". If subject contains "BGV" or "Background Verification" or "Initiate BGV" → classify as "bgv_report" (even if body is just "Please find attached"). If subject contains "Confirm Access to Your Official Email" → classify as "official_email_access_confirmed" or "official_email_access_failed" based on whether the body is positive or negative. If subject contains "25th Day Catchup" → classify as "catchup25_complete". If subject contains "Could Not Be Verified" or "Action Required" or "Re-upload" AND there are attachments in ATTACHMENTS → classify as "doc_reupload" (joinee re-sending corrected document). If subject contains "Could Not Be Verified" or "Still Pending" and body is a positive confirmation with NO attachments → classify as "doc_manually_approved". Subject is the strongest signal.
+IMPORTANT: If subject or body indicates candidate did not join, stop case, induction stop case, or candidate left → classify as "candidate_no_join" and set isOnboardingReply=true. If FROM contains "greythr" OR body contains "greythr.com" or "self-service account" or "payslips" and "leaves" → classify as "greythr_welcome" and extract the joinee name from the greeting line into data.notes. If the subject contains "Pre-Onboarding Form" and the body mentions preferred times for meetings → classify as "meeting_time_preference" and extract inductionTime and projectIntroTime into data. If the subject contains "Asset & Seat Allocation" → classify as "manager_allocation". If subject contains "IT Asset" or "IT Asset Setup Required" or "IT Team" → classify as "it_allocation"; also classify as it_allocation if the body contains "Asset Assigned: Y" or confirms assets are physically ready/handed over. For BGV: ATTACHMENT OVERRIDES BODY TEXT — if ATTACHMENTS contains a PDF with "smartscreen", "bgv", "background", or "report" in the filename → always classify as "bgv_report" regardless of what the body says; if subject mentions BGV but ATTACHMENTS is none or empty → classify as "unknown" (sender forgot to attach the PDF). If subject contains "Confirm Access to Your Official Email" → classify as "official_email_access_confirmed" or "official_email_access_failed" based on whether the body is positive or negative. If subject contains "25th Day Catchup" → classify as "catchup25_complete". If subject contains "Could Not Be Verified" or "Action Required" or "Re-upload" AND there are attachments in ATTACHMENTS → classify as "doc_reupload" (joinee re-sending corrected document). If subject contains "Could Not Be Verified" or "Still Pending" and body is a positive confirmation with NO attachments → classify as "doc_manually_approved". Subject is the strongest signal; but for BGV the ATTACHMENT FILENAME is the strongest signal.
 Simple acknowledgements ("ok", "noted", "will do", "thanks") should be classified with isOnboardingReply=false unless they contain substantive information.
 
 Respond ONLY with a JSON object in this exact format:

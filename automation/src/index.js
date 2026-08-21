@@ -927,7 +927,34 @@ async function processBGVReport(auth, employee, rawMsg) {
 
   const attachment = rawMsg.attachments && rawMsg.attachments[0];
   if (!attachment) {
-    console.warn(`[BGV] No PDF attachment found in email for ${employee.name}`);
+    console.warn(`[BGV] No PDF attachment found in bgv_report email for ${employee.name} — sending reminder to sender`);
+    // The sender replied without attaching the PDF (e.g. just typed "please upload" or forwarded text).
+    // Send an immediate, actionable reply so they know exactly what to do.
+    const senderEmail = rawMsg.from
+      ? rawMsg.from.replace(/.*<([^>]+)>.*/, '$1').trim() || rawMsg.from.trim()
+      : null;
+    const recipientList = [senderEmail, (employee.contacts && employee.contacts.hrEmail) || process.env.HR_EMAIL]
+      .filter(Boolean)
+      .filter((v, i, a) => a.indexOf(v) === i) // deduplicate
+      .join(', ');
+    if (recipientList) {
+      await sendEmail({
+        to: recipientList,
+        subject: `Action Required — BGV PDF Not Received for ${employee.name} (${employee.employeeId})`,
+        html: `
+          <p>Hi,</p>
+          <p>We received your reply regarding the BGV report for <strong>${employee.name} (${employee.employeeId})</strong>, but <strong>no PDF was attached</strong>.</p>
+          <p>To complete the BGV step, please:</p>
+          <ol>
+            <li><strong>Reply to the original BGV upload request email</strong> (subject: "Action Required — Upload BGV Report for ${employee.name}")</li>
+            <li><strong>Attach the SmartScreen BGV report PDF</strong> to your reply</li>
+          </ol>
+          <p>The automation will read the PDF, classify the result, and update the onboarding checklist automatically — no manual entry needed.</p>
+          <p style="color:#e65100;font-weight:bold;">⚠️ The BGV status for ${employee.name} will remain pending until the PDF is received.</p>
+          <p>Regards,<br/>${process.env.COMPANY_NAME} HR Automation</p>
+        `,
+      }).catch(err => console.warn(`[BGV] Could not send no-attachment reminder: ${err.message}`));
+    }
     return;
   }
 
@@ -1202,13 +1229,17 @@ async function handleReply(auth, classified, rawMsg) {
 
     const PENDING_TASK_MAP = {
       candidate_no_join:          e => e.status !== 'stopped',
-      it_allocation:              e => isTaskDone(e.checklist, 't20') && !isTaskDone(e.checklist, 't21'),
+      // t20 = IT email sent; t21 = IT confirmed assets; t22 = IT setup complete
+      // Match employees awaiting IT confirmation OR employees where IT re-confirmed after a revert
+      // (t21 not done means still pending; include t22 not done as a safety net for re-sends)
+      it_allocation:              e => isTaskDone(e.checklist, 't20') && (!isTaskDone(e.checklist, 't21') || !isTaskDone(e.checklist, 't22')),
       manager_allocation:         e => isTaskDone(e.checklist, 't17') && !isTaskDone(e.checklist, 't18'),
       official_email_created:     e => !isTaskDone(e.checklist, 't15'),
       greythr_welcome:            e => isTaskDone(e.checklist, 't14') && !isTaskDone(e.checklist, 't16'),
       official_email_access_confirmed: e => isTaskDone(e.checklist, 't15') && !isTaskDone(e.checklist, 't16'),
       official_email_access_failed:    e => isTaskDone(e.checklist, 't15') && !isTaskDone(e.checklist, 't16'),
-      bgv_report:                 e => isTaskDone(e.checklist, 't23') && !isTaskDone(e.checklist, 't25'),
+      // Allow BGV re-processing when previous result was Orange/Red (t25 done but t26 not done)
+      bgv_report:                 e => isTaskDone(e.checklist, 't23') && !isTaskDone(e.checklist, 't26'),
       induction_confirmed:        e => !isTaskDone(e.checklist, 't33'),
     };
 
@@ -1434,6 +1465,12 @@ async function handleReply(auth, classified, rawMsg) {
       break;
 
     case 'it_allocation':
+      // Idempotency guard: skip if IT confirmation is already recorded (t21 + t22 both done).
+      // This prevents a second IT team member's reply in the same thread from double-processing.
+      if (isTaskDone(checklist, 't21') && isTaskDone(checklist, 't22')) {
+        console.log(`[Index] IT allocation already confirmed for ${employee.name} — skipping duplicate reply`);
+        break;
+      }
       markAndLog(employee, 't21');
       markAndLog(employee, 't22');
       markAndLog(employee, 't35');
@@ -1522,9 +1559,18 @@ async function handleReply(auth, classified, rawMsg) {
 
     case 'bgv_report': {
       const bgvLockKey = `${employee.employeeId}:bgv_report`;
-      if (isTaskDone(checklist, 't25')) {
-        console.log(`[BGV] Skipping duplicate bgv_report for ${employee.name} — already done`);
+      // Allow re-processing if the previous BGV was Orange/Red (t25 done but t26 not done).
+      // t25 = "BGV report received", t26 = "BGV cleared (Green)"
+      // If both t25 and t26 are done the BGV is already fully green — skip duplicate.
+      // If t25 is done but t26 is NOT done the previous result was Unable-to-Verify or Discrepancy,
+      // so an updated report from the vendor must be re-processed to advance to Green.
+      const bgvAlreadyFinalised = isTaskDone(checklist, 't25') && isTaskDone(checklist, 't26');
+      if (bgvAlreadyFinalised) {
+        console.log(`[BGV] Skipping duplicate bgv_report for ${employee.name} — BGV already finalised (Green)`);
         return;
+      }
+      if (isTaskDone(checklist, 't25') && !isTaskDone(checklist, 't26')) {
+        console.log(`[BGV] Re-processing BGV report for ${employee.name} — previous result was Unable-to-Verify/Discrepancy, checking updated report`);
       }
       if (_triggerLocks.has(bgvLockKey)) {
         console.log(`[BGV] Skipping duplicate bgv_report for ${employee.name} — in flight`);
@@ -1536,8 +1582,8 @@ async function handleReply(auth, classified, rawMsg) {
       } catch (err) {
         console.error(`[BGV] processBGVReport failed for ${employee.name}: ${err.message}`);
       } finally {
-        // Clear lock so a retry with a different email (e.g. actual PDF reply) can proceed
-        if (!isTaskDone(employee.checklist, 't25')) _triggerLocks.delete(bgvLockKey);
+        // Clear lock so a future updated report (e.g. vendor re-verifies) can proceed
+        if (!isTaskDone(employee.checklist, 't26')) _triggerLocks.delete(bgvLockKey);
       }
       // checklist save and state save are handled inside processBGVReport
       return;
