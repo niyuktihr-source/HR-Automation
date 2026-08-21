@@ -2147,6 +2147,127 @@ async function onboardEmployee(auth, employee) {
   }
 }
 
+// ─── Startup self-healing reconciliation ──────────────────────────────────────
+// Runs once on engine startup (8s after Gmail watch settles).
+// Detects employees stuck in broken states and searches Gmail for resolution
+// emails that were missed/dropped, re-processes them, and updates dashboards.
+// The engine fixes itself on every restart — no manual work needed.
+async function reconcileStuckEmployees(auth) {
+  const employees = Object.values(employeeRegistry).filter(e => !e.isStopped);
+  if (employees.length === 0) return;
+
+  const { google } = require('googleapis');
+  const gmail = google.gmail({ version: 'v1', auth });
+  const BGV_PDF_RE = /smartscreen|bgv|background.?verif|supersoft/i;
+
+  console.log(`\n[Reconcile] ▶ Startup self-healing pass — checking ${employees.length} employee(s) for stuck states...`);
+  let fixedCount = 0;
+
+  for (const employee of employees) {
+    const cl = employee.checklist;
+
+    // ── Case 1: BGV stuck Orange/Red (t25 ✅ t26 ❌) ──────────────────────────
+    if (isTaskDone(cl, 't25') && !isTaskDone(cl, 't26')) {
+      console.log(`[Reconcile] ${employee.name} — BGV not finalised. Searching Gmail for updated SmartScreen PDF...`);
+      try {
+        const q = `(subject:BGV OR subject:"Background Verification" OR subject:"Upload BGV") (${employee.employeeId} OR "${employee.name}") has:attachment newer_than:60d`;
+        const res = await gmail.users.messages.list({ userId: 'me', q, maxResults: 10 });
+        for (const msgRef of (res.data.messages || [])) {
+          try {
+            const full = await gmail.users.messages.get({ userId: 'me', id: msgRef.id, format: 'full' });
+            const msg = full.data;
+            const headers = {};
+            for (const h of (msg.payload.headers || [])) headers[h.name.toLowerCase()] = h.value;
+            let body = '';
+            const extractBody = (part) => {
+              if (part.mimeType === 'text/plain' && part.body && part.body.data)
+                body += Buffer.from(part.body.data, 'base64').toString('utf8');
+              for (const sub of part.parts || []) extractBody(sub);
+            };
+            extractBody(msg.payload);
+            const attachments = [];
+            const extractAttachments = (part) => {
+              if (part.filename && (part.filename || '').toLowerCase().endsWith('.pdf') &&
+                  BGV_PDF_RE.test(part.filename) && part.body) {
+                attachments.push({ filename: part.filename, attachmentId: part.body.attachmentId || null, data: part.body.data || null, mimeType: part.mimeType || 'application/pdf' });
+              }
+              for (const sub of part.parts || []) extractAttachments(sub);
+            };
+            extractAttachments(msg.payload);
+            if (attachments.length === 0) continue;
+
+            console.log(`[Reconcile] 🔄 Re-processing BGV PDF for ${employee.name} (${attachments[0].filename})`);
+            await processBGVReport(auth, employee, { id: msgRef.id, from: headers['from'] || '', subject: headers['subject'] || '', body: body.trim(), threadId: msg.threadId, attachments });
+            fixedCount++;
+            if (isTaskDone(employee.checklist, 't26')) {
+              console.log(`[Reconcile] ✅ BGV now Green for ${employee.name}`);
+              break;
+            }
+          } catch (err) {
+            console.warn(`[Reconcile] Could not re-process BGV email ${msgRef.id}: ${err.message}`);
+          }
+        }
+      } catch (err) {
+        console.warn(`[Reconcile] Gmail search failed for ${employee.name} BGV: ${err.message}`);
+      }
+    }
+
+    // ── Case 2: IT confirmation missed (t20 ✅ t21 ❌) ────────────────────────
+    if (isTaskDone(cl, 't20') && !isTaskDone(cl, 't21')) {
+      console.log(`[Reconcile] ${employee.name} — IT not confirmed. Searching Gmail for IT reply...`);
+      try {
+        const q = `(subject:"IT Asset" OR subject:"IT Asset Setup Required") (${employee.employeeId} OR "${employee.name}") newer_than:60d`;
+        const res = await gmail.users.messages.list({ userId: 'me', q, maxResults: 10 });
+        const engineEmail = (process.env.ENGINE_EMAIL || process.env.GMAIL_USER || '').toLowerCase();
+        const IT_CONFIRM_RE = /asset\s+assigned\s*:\s*y(es)?|asset.*(ready|done|confirmed|set\s*up|handed)/i;
+        for (const msgRef of (res.data.messages || [])) {
+          try {
+            const full = await gmail.users.messages.get({ userId: 'me', id: msgRef.id, format: 'full' });
+            const msg = full.data;
+            const headers = {};
+            for (const h of (msg.payload.headers || [])) headers[h.name.toLowerCase()] = h.value;
+            if ((headers['from'] || '').toLowerCase().includes(engineEmail)) continue; // skip our own sent email
+            let body = '';
+            const extractBody2 = (part) => {
+              if (part.mimeType === 'text/plain' && part.body && part.body.data)
+                body += Buffer.from(part.body.data, 'base64').toString('utf8');
+              for (const sub of part.parts || []) extractBody2(sub);
+            };
+            extractBody2(msg.payload);
+            if (!IT_CONFIRM_RE.test(body) && !IT_CONFIRM_RE.test(headers['subject'] || '')) continue;
+
+            console.log(`[Reconcile] 🔄 Re-processing IT confirmation for ${employee.name} from: ${headers['from']}`);
+            if (!isTaskDone(employee.checklist, 't21')) {
+              markAndLog(employee, 't21');
+              markAndLog(employee, 't22');
+              markAndLog(employee, 't35');
+              activityLog.log(employee, 'it_allocation_confirmed_reconcile');
+              await markITConfirmed(auth, employee).catch(() => {});
+              await uploadChecklist(auth, employee.driveFolderId, employee.checklist);
+              saveState(employee.employeeId, snapshotEmployee(employee));
+              console.log(`[Reconcile] ✅ IT now confirmed for ${employee.name}`);
+              fixedCount++;
+            }
+            break;
+          } catch (err) {
+            console.warn(`[Reconcile] Could not re-process IT email ${msgRef.id}: ${err.message}`);
+          }
+        }
+      } catch (err) {
+        console.warn(`[Reconcile] Gmail search failed for ${employee.name} IT: ${err.message}`);
+      }
+    }
+  }
+
+  if (fixedCount > 0) {
+    console.log(`\n[Reconcile] ✅ Self-healing complete — resolved ${fixedCount} stuck state(s). Refreshing master dashboard...`);
+    updateMasterDashboard(auth, Object.values(employeeRegistry))
+      .catch(err => console.warn('[Reconcile] Dashboard refresh failed:', err.message));
+  } else {
+    console.log('[Reconcile] ✅ Self-healing complete — all employees in a consistent state.\n');
+  }
+}
+
 // ─── Main entry point ─────────────────────────────────────────────────────────
 async function main() {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -2359,6 +2480,14 @@ async function main() {
       await onboardEmployee(auth, employee);
     }
   }
+
+  // ── Startup reconciliation — self-healing pass ──────────────────────────────
+  // After all employees are loaded, scan for any whose state is stuck in a
+  // broken condition (BGV orange, IT still pending, etc.) and attempt to
+  // resolve them by searching Gmail for the missed emails.
+  // This means the engine fixes itself on restart — no manual intervention needed.
+  setTimeout(() => reconcileStuckEmployees(auth), 8000); // 8s delay to let Gmail watch settle
+  // ─────────────────────────────────────────────────────────────────────────────
 
   // Build master dashboard with all loaded employees
   if (Object.keys(employeeRegistry).length > 0) {
