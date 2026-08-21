@@ -2166,8 +2166,13 @@ async function reconcileStuckEmployees(auth) {
   for (const employee of employees) {
     const cl = employee.checklist;
 
-    // ── Case 1: BGV stuck Orange/Red (t25 ✅ t26 ❌) ──────────────────────────
-    if (isTaskDone(cl, 't25') && !isTaskDone(cl, 't26')) {
+    // ── Case 1: BGV not finalised (t23 ✅ t26 ❌) ────────────────────────────
+    // t23 = BGV initiated, t26 = BGV cleared Green.
+    // We do NOT require t25 (BGV received) because t25 may not have been saved
+    // if the original processing crashed after updating the sheet but before
+    // saving state — leaving the sheet orange but t25 unmarked in state.
+    // So: if BGV was initiated but not yet confirmed Green, always try to fix it.
+    if (isTaskDone(cl, 't23') && !isTaskDone(cl, 't26')) {
       console.log(`[Reconcile] ${employee.name} — BGV not finalised. Searching Gmail for updated SmartScreen PDF...`);
       try {
         const q = `(subject:BGV OR subject:"Background Verification" OR subject:"Upload BGV") (${employee.employeeId} OR "${employee.name}") has:attachment newer_than:60d`;
