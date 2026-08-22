@@ -114,25 +114,29 @@ async function run() {
   console.log('Total responses: ' + (rows.length - 1));
   console.log('');
 
-  // Find "Employee ID" column index
-  const empIdColIdx = headers.findIndex(h =>
-    h.trim().toLowerCase() === 'employee id' ||
-    h.trim().toLowerCase().startsWith('employee id(')
-  );
-  if (empIdColIdx === -1) {
-    console.error('Could not find "Employee ID" column in the sheet.');
-    console.error('Headers found:', headers);
-    process.exit(1);
-  }
+  // Column index finders
+  const empIdColIdx = headers.findIndex(h => {
+    const t = h.trim().toLowerCase();
+    return t === 'employee id' || t.startsWith('employee id(');
+  });
+  const emailColIdx = headers.findIndex(h => {
+    const t = h.trim().toLowerCase();
+    return t === 'email address' || t === 'email' || t === 'username' || t.includes('email');
+  });
+  const nameColIdx = headers.findIndex(h => {
+    const t = h.trim().toLowerCase();
+    return t === 'full name' || t === 'name' || t.startsWith('full name(');
+  });
 
-  // Build map: employeeId -> personalDetails (from sheet row)
-  const responseMap = {};
-  for (let r = 1; r < rows.length; r++) {
-    const row = rows[r];
-    const empId = (row[empIdColIdx] || '').trim();
-    if (!empId) continue;
-    if (!responseMap[empId]) responseMap[empId] = [];
-    responseMap[empId].push(row);
+  function isTestRow(row) {
+    let testCount = 0;
+    for (const cell of row) {
+      const s = String(cell || '').trim().toUpperCase();
+      if (s === 'TEST' || s === '123456789' || s === '1234567890' || s === 'TESTING') {
+        testCount++;
+      }
+    }
+    return testCount >= 2;
   }
 
   // Process each requested employee
@@ -141,20 +145,48 @@ async function run() {
 
     const state = loadState(employeeId);
     if (!state) {
-      console.warn('    No state file Â skipping');
+      console.warn('    No state file — skipping');
       continue;
     }
 
-    const matches = responseMap[employeeId];
-    if (!matches || matches.length === 0) {
+    const empName = (state.name || '').trim().toLowerCase();
+    const empEmail = (state.personalEmail || '').trim().toLowerCase();
+
+    // Find all matching rows for this employee
+    const matches = [];
+    for (let r = 1; r < rows.length; r++) {
+      const row = rows[r];
+      const rowEmpId = empIdColIdx !== -1 ? (row[empIdColIdx] || '').trim() : '';
+      const rowEmail = emailColIdx !== -1 ? (row[emailColIdx] || '').trim().toLowerCase() : '';
+      const rowName = nameColIdx !== -1 ? (row[nameColIdx] || '').trim().toLowerCase() : '';
+
+      let isMatch = false;
+      if (rowEmpId && rowEmpId.toUpperCase() === employeeId.toUpperCase()) {
+        isMatch = true;
+      } else if (empEmail && rowEmail && rowEmail === empEmail) {
+        isMatch = true;
+      } else if (empName && rowName && (rowName === empName || rowName.includes(empName) || empName.includes(rowName))) {
+        isMatch = true;
+      }
+
+      if (isMatch) {
+        matches.push({ rowIdx: r + 1, row, isTest: isTestRow(row) });
+      }
+    }
+
+    if (matches.length === 0) {
       console.warn('    No response row found in sheet for ' + employeeId);
-      console.warn('    Check if the Employee ID field was filled in the form');
       continue;
     }
 
-    // Use the LAST submission if there are multiple
-    const row = matches[matches.length - 1];
-    console.log('    Found ' + matches.length + ' response(s) Â using latest');
+    // Prefer non-test rows; take the latest non-test row if available
+    const nonTestMatches = matches.filter(m => !m.isTest);
+    const chosen = nonTestMatches.length > 0
+      ? nonTestMatches[nonTestMatches.length - 1]
+      : matches[matches.length - 1];
+
+    console.log(`    Found ${matches.length} response(s) — using row ${chosen.rowIdx} ${chosen.isTest ? '(TEST row)' : '(Valid response)'}`);
+    const row = chosen.row;
 
     // Build personalDetails from non-file columns
     const personalDetails = {};

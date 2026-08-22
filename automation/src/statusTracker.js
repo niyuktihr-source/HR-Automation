@@ -873,7 +873,30 @@ async function createEmployeeInfoSheet(auth, employee) {
     const reliev   = ex.relievingLetter    || {};
 
     try {
-      // Update personal details rows (C2:C36 — value column only, preserves labels)
+      const emergencyContactNo = v(pd['Emergency Contact no (From Family)'] || pd['Emergency Contact Mobile Number'] || pd['Emergency Contact Number'] || '');
+      const emergencyContactPerson = v(
+        pd['Emergency Contact Person Name and Relationship'] ||
+        (pd['Emergency Contact Person Name'] && pd['Emergency Contact Relationship']
+          ? `${pd['Emergency Contact Person Name']} (${pd['Emergency Contact Relationship']})`
+          : '') ||
+        (pd['Emergency Contact Name'] && pd['Relationship to You']
+          ? `${pd['Emergency Contact Name']} (${pd['Relationship to You']})`
+          : '') ||
+        pd['Emergency Contact Person Name'] ||
+        pd['Emergency Contact Name'] ||
+        pd['Emergency Contact Relationship'] ||
+        pd['Relationship to You'] ||
+        ''
+      );
+      const nomineeDetails = v(
+        pd['Nominee details for Group Insurance'] ||
+        (pd['Name of the Nominee']
+          ? `${pd['Name of the Nominee']} (${pd['Nominee Relationship with you'] || ''})${pd['Contact Number of the Nominee'] ? ' - ' + pd['Contact Number of the Nominee'] : ''}`
+          : '') ||
+        pd['Nominee Details'] ||
+        ''
+      );
+
       const personalValueRows = [
         [v(pan.name)],
         [v(aadhaar.name)],
@@ -881,19 +904,19 @@ async function createEmployeeInfoSheet(auth, employee) {
         [v(aadhaar.dob || pan.dob)],
         [calcAge(aadhaar.dob || pan.dob)],
         [v(pan.fatherName)],
-        [v(pd["Mother's Name"])],
+        [v(pd["Mother's Name"] || pd['Mother Name'] || '')],
         [v(pd['Marital Status'])],
-        [v(pd['Name of Spouse (if married)'])],
-        [v(pd['Date of Birth of Spouse (if married)'])],
-        [v(pd['Profession of Spouse (if married)'])],
-        [v(pd['Number of Children'])],
-        [v(pd['Name(s) of Child / Children'])],
+        [v(pd['Name of Spouse (if married)'] || pd['Name of Spouse'])],
+        [v(pd['Date of Birth of Spouse (if married)'] || pd['DOB of Spouse'])],
+        [v(pd['Profession of Spouse (if married)'] || pd['Profession of Spouse'])],
+        [v(pd['Number of Children'] || pd['No of children'])],
+        [v(pd['Name(s) of Child / Children'] || pd['Name of child'])],
         [''],  // DOB of child — not collected by form
         [''],  // Gender of child — not collected by form
         [v(employee.phoneNumber)],
-        [v(pd['Emergency Contact no (From Family)'])],
-        [v(pd['Emergency Contact Relationship'] || '')],
-        [v(pd['Nominee details for Group Insurance'])],
+        [emergencyContactNo],
+        [emergencyContactPerson],
+        [nomineeDetails],
         [v(personalEmail)],
         [v(aadhaar.address)],
         [v(aadhaar.address)],
@@ -1008,19 +1031,39 @@ async function createEmployeeInfoSheet(auth, employee) {
       ['4',  'Date of Birth',            v(aadhaar.dob || pan.dob)],
       ['5',  'Age',                      calcAge(aadhaar.dob || pan.dob)],
       ['6',  "Father's Name",            v(pan.fatherName)],
-      ['7',  "Mother's Name",            v(pd["Mother's Name"])],
+      ['7',  "Mother's Name",            v(pd["Mother's Name"] || pd['Mother Name'])],
       ['8',  'Marital Status',           v(pd['Marital Status'])],
-      ['9',  'Name of Spouse',           v(pd['Name of Spouse (if married)'])],
-      ['10', 'DOB of Spouse',            v(pd['Date of Birth of Spouse (if married)'])],
-      ['11', 'Profession of Spouse',     v(pd['Profession of Spouse (if married)'])],
-      ['12', 'No of children',           v(pd['Number of Children'])],
-      ['13', 'Name of child',            v(pd['Name(s) of Child / Children'])],
+      ['9',  'Name of Spouse',           v(pd['Name of Spouse (if married)'] || pd['Name of Spouse'])],
+      ['10', 'DOB of Spouse',            v(pd['Date of Birth of Spouse (if married)'] || pd['DOB of Spouse'])],
+      ['11', 'Profession of Spouse',     v(pd['Profession of Spouse (if married)'] || pd['Profession of Spouse'])],
+      ['12', 'No of children',           v(pd['Number of Children'] || pd['No of children'])],
+      ['13', 'Name of child',            v(pd['Name(s) of Child / Children'] || pd['Name of child'])],
       ['14', 'DOB of child',             ''],  // not collected by form
       ['15', 'Gender of child',          ''],  // not collected by form
       ['16', 'Phone No',                 v(employee.phoneNumber)],
-      ['17', 'Emergency Contact no (From Family)', v(pd['Emergency Contact no (From Family)'])],
-      ['18', 'Emergency Contact Person Name and Relationship', v(pd['Emergency Contact Relationship'] || '')],
-      ['19', 'Nominee details for Group Insurance', v(pd['Nominee details for Group Insurance'])],
+      ['17', 'Emergency Contact no (From Family)', v(pd['Emergency Contact no (From Family)'] || pd['Emergency Contact Mobile Number'] || pd['Emergency Contact Number'])],
+      ['18', 'Emergency Contact Person Name and Relationship', v(
+        pd['Emergency Contact Person Name and Relationship'] ||
+        (pd['Emergency Contact Person Name'] && pd['Emergency Contact Relationship']
+          ? `${pd['Emergency Contact Person Name']} (${pd['Emergency Contact Relationship']})`
+          : '') ||
+        (pd['Emergency Contact Name'] && pd['Relationship to You']
+          ? `${pd['Emergency Contact Name']} (${pd['Relationship to You']})`
+          : '') ||
+        pd['Emergency Contact Person Name'] ||
+        pd['Emergency Contact Name'] ||
+        pd['Emergency Contact Relationship'] ||
+        pd['Relationship to You'] ||
+        ''
+      )],
+      ['19', 'Nominee details for Group Insurance', v(
+        pd['Nominee details for Group Insurance'] ||
+        (pd['Name of the Nominee']
+          ? `${pd['Name of the Nominee']} (${pd['Nominee Relationship with you'] || ''})${pd['Contact Number of the Nominee'] ? ' - ' + pd['Contact Number of the Nominee'] : ''}`
+          : '') ||
+        pd['Nominee Details'] ||
+        ''
+      )],
       ['20', 'Personal Email ID',        v(personalEmail)],
       ['21', 'Current Address',          v(aadhaar.address)],
       ['22', 'Permanent Address',        v(aadhaar.address)],
