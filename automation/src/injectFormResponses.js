@@ -95,9 +95,12 @@ async function run() {
 
   // Read the entire response sheet
   console.log('\nReading form responses from spreadsheet: ' + spreadsheetId);
+  const meta = await sheets.spreadsheets.get({ spreadsheetId, fields: 'sheets.properties' });
+  const tabName = meta.data.sheets[0].properties.title;
+  console.log('Using tab: ' + tabName);
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: 'Sheet1',   // Google Forms always names it Sheet1
+    range: tabName
   });
 
   const rows = res.data.values || [];
@@ -138,7 +141,7 @@ async function run() {
 
     const state = loadState(employeeId);
     if (!state) {
-      console.warn('    No state file � skipping');
+      console.warn('    No state file Â skipping');
       continue;
     }
 
@@ -151,7 +154,7 @@ async function run() {
 
     // Use the LAST submission if there are multiple
     const row = matches[matches.length - 1];
-    console.log('    Found ' + matches.length + ' response(s) � using latest');
+    console.log('    Found ' + matches.length + ' response(s) Â using latest');
 
     // Build personalDetails from non-file columns
     const personalDetails = {};
@@ -179,7 +182,7 @@ async function run() {
     try {
       const result = await postToEngine(payload);
       if (result.status === 200) {
-        console.log('    Engine accepted � ' + result.body);
+        console.log('    Engine accepted Â ' + result.body);
       } else {
         console.warn('    Engine returned ' + result.status + ': ' + result.body);
       }
@@ -194,4 +197,4 @@ async function run() {
   console.log('  node src/backfillInfoSheets.js ' + employeeIds.join(' '));
 }
 
-run().catch(err => { console.error('Fatal:', err.message); process.exit(1); });
+run().catch(err => { console.error('Fatal:', err.message); process.exit(1); });
