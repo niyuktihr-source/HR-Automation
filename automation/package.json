@@ -17,6 +17,7 @@
     "test-emails": "node src/testEmails.js",
     "health": "node -e \"require('http').get('http://localhost:' + (process.env.WEBHOOK_PORT || 3000) + '/health', r => { let d=''; r.on('data', c => d+=c); r.on('end', () => console.log(JSON.parse(d))); }).on('error', e => { console.error('Engine not running:', e.message); process.exit(1); })\"",
     "verify-audit": "node -e \"require('dotenv').config(); const {verifyTodayLog} = require('./src/secureAuditLog'); const r = verifyTodayLog(); console.log(r); process.exit(r.ok ? 0 : 1);\"",
+    "backfill-sheets": "node src/backfillInfoSheets.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
