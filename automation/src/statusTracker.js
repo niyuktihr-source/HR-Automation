@@ -891,11 +891,9 @@ async function createEmployeeInfoSheet(auth, employee) {
         [''],  // DOB of child — not collected by form
         [''],  // Gender of child — not collected by form
         [v(employee.phoneNumber)],
-        [v(pd['Emergency Contact Mobile Number'])],
-        [v(pd['Emergency Contact Name'] && pd['Relationship to You']
-          ? `${pd['Emergency Contact Name']} (${pd['Relationship to You']})`
-          : pd['Emergency Contact Name'] || pd['Relationship to You'] || '')],
-        [v(pd['Nominee Details'])],
+        [v(pd['Emergency Contact no (From Family)'])],
+        [v(pd['Emergency Contact Relationship'] || '')],
+        [v(pd['Nominee details for Group Insurance'])],
         [v(personalEmail)],
         [v(aadhaar.address)],
         [v(aadhaar.address)],
@@ -1020,16 +1018,13 @@ async function createEmployeeInfoSheet(auth, employee) {
       ['14', 'DOB of child',             ''],  // not collected by form
       ['15', 'Gender of child',          ''],  // not collected by form
       ['16', 'Phone No',                 v(employee.phoneNumber)],
-      ['17', 'Emergency Contact no (From Family)', v(pd['Emergency Contact Mobile Number'])],
-      ['18', 'Emergency Contact Person Name and Relationship',
-             v(pd['Emergency Contact Name'] && pd['Relationship to You']
-               ? `${pd['Emergency Contact Name']} (${pd['Relationship to You']})`
-               : pd['Emergency Contact Name'] || pd['Relationship to You'] || '')],
-      ['19', 'Nominee details for Group Insurance', v(pd['Nominee Details'])],
+      ['17', 'Emergency Contact no (From Family)', v(pd['Emergency Contact no (From Family)'])],
+      ['18', 'Emergency Contact Person Name and Relationship', v(pd['Emergency Contact Relationship'] || '')],
+      ['19', 'Nominee details for Group Insurance', v(pd['Nominee details for Group Insurance'])],
       ['20', 'Personal Email ID',        v(personalEmail)],
       ['21', 'Current Address',          v(aadhaar.address)],
       ['22', 'Permanent Address',        v(aadhaar.address)],
-      ['23', 'Blood Group',              v(pd['Blood Group'])],
+      ['23', 'Blood Group',              ''],  // not collected by deployed forms
       ['24', 'Knowledge of foreign languages', ''],
       ['25', 'Personal Bank Account Number\nEmployee Name:\nBank Name:\nBranch:\nIFSC Code:\nAccount Number:', ''],
       [],
