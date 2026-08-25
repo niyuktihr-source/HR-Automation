@@ -436,6 +436,8 @@ module.exports = {
   renameStatusSheet,
   createProjectIntroSheet,
   createEmployeeInfoSheet,
+  getOrCreateCatchupSheet,
+  createCatchupSheet: getOrCreateCatchupSheet,
 };
 
 // ─── Project Intro Sheet ───────────────────────────────────────────────────────
@@ -1412,3 +1414,119 @@ async function createEmployeeInfoSheet(auth, employee) {
     return null;
   }
 }
+
+// ─── Catchup Sheet (from Catchup Master Template) ───────────────────────────
+// Creates a copy of the Catchup master template in the employee's automation folder,
+// named with the new joinee's name appended to the template name.
+// Returns the sheet URL, or null on failure.
+async function getOrCreateCatchupSheet(auth, employee) {
+  const drive = google.drive({ version: 'v3', auth });
+  const { name, employeeId, contacts } = employee;
+  const recruiterEmail = contacts && contacts.recruiterEmail;
+  const managerEmail = contacts && contacts.managerEmail;
+  const joineeEmail = employee.officialEmail || employee.personalEmail;
+
+  // 1. If sheet ID is already known in memory or state, return its URL
+  if (employee.catchupSheetId) {
+    employee.catchupSheetUrl = `https://docs.google.com/spreadsheets/d/${employee.catchupSheetId}`;
+    return employee.catchupSheetUrl;
+  }
+
+  // 2. Search Drive inside employee's folder for an existing copied catchup sheet
+  const targetFolderId = employee.driveFolderId || employee.rootFolderId;
+  if (targetFolderId) {
+    try {
+      const existing = await apiWithRetry(() => drive.files.list({
+        q: `'${targetFolderId}' in parents and (name contains '${employeeId}' or name contains '${name.replace(/'/g, "\\'")}') and trashed=false`,
+        fields: 'files(id, name)',
+        pageSize: 10,
+      }), 'getOrCreateCatchupSheet:findExisting');
+
+      const catchupFile = (existing.data.files || []).find(f =>
+        f.name.toLowerCase().includes('catch') ||
+        f.name.toLowerCase().includes('review') ||
+        f.name.toLowerCase().includes('tracker')
+      );
+
+      if (catchupFile) {
+        employee.catchupSheetId = catchupFile.id;
+        employee.catchupSheetUrl = `https://docs.google.com/spreadsheets/d/${catchupFile.id}`;
+        console.log(`[Status] Found existing catchup sheet for ${name}: ${employee.catchupSheetUrl}`);
+        return employee.catchupSheetUrl;
+      }
+    } catch (err) {
+      console.warn(`[Status] Error searching for existing catchup sheet for ${name}: ${err.message}`);
+    }
+  }
+
+  // 3. Resolve master template ID
+  let templateId = process.env.CATCHUP_TEMPLATE_ID;
+  if (!templateId && process.env.CATCHUP_TRACKING_SHEET_LINK) {
+    const match = process.env.CATCHUP_TRACKING_SHEET_LINK.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+    if (match) templateId = match[1];
+  }
+  if (!templateId) {
+    templateId = '1lBYyDulR4yy5stD6QRrN_n6h_8qiIIIe'; // fallback default master catchup template
+  }
+
+  try {
+    // 4. Fetch base template title to append joinee name
+    let baseTitle = '30-Day Catchup Call';
+    try {
+      const templateMeta = await apiWithRetry(() => drive.files.get({
+        fileId: templateId,
+        fields: 'name',
+      }), 'getOrCreateCatchupSheet:getTemplateMeta');
+      if (templateMeta.data && templateMeta.data.name) {
+        baseTitle = templateMeta.data.name;
+      }
+    } catch (e) {
+      console.warn(`[Status] Could not fetch template meta for ${templateId}: ${e.message}`);
+    }
+
+    const newTitle = `${baseTitle} — ${name} (${employeeId})`;
+
+    // 5. Copy the master template
+    const copy = await apiWithRetry(() => drive.files.copy({
+      fileId: templateId,
+      requestBody: { name: newTitle },
+    }), 'getOrCreateCatchupSheet:copy');
+    const spreadsheetId = copy.data.id;
+    console.log(`[Status] Catchup sheet copied from template for ${name}: ${spreadsheetId}`);
+
+    // 6. Move copied file into employee's Drive automation folder
+    if (targetFolderId) {
+      const fileMeta = await apiWithRetry(() => drive.files.get({
+        fileId: spreadsheetId,
+        fields: 'parents',
+      }), 'getOrCreateCatchupSheet:getParents');
+      const currentParents = (fileMeta.data.parents || []).join(',');
+      await apiWithRetry(() => drive.files.update({
+        fileId: spreadsheetId,
+        addParents: targetFolderId,
+        removeParents: currentParents,
+        fields: 'id, parents',
+      }), 'getOrCreateCatchupSheet:move');
+    }
+
+    // 7. Share with recruiter, reporting manager, and joinee
+    const shareWith = [recruiterEmail, managerEmail, joineeEmail].filter(Boolean);
+    for (const email of [...new Set(shareWith)]) {
+      await drive.permissions.create({
+        fileId: spreadsheetId,
+        requestBody: { type: 'user', role: 'writer', emailAddress: email },
+        sendNotificationEmail: false,
+      }).catch(e => console.warn(`[Status] Could not share catchup sheet with ${email}: ${e.message}`));
+    }
+
+    employee.catchupSheetId = spreadsheetId;
+    employee.catchupSheetUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}`;
+    if (employee._saveState) employee._saveState();
+    console.log(`[Status] Catchup sheet created for ${name}: ${employee.catchupSheetUrl}`);
+    return employee.catchupSheetUrl;
+  } catch (err) {
+    console.error(`[Status] getOrCreateCatchupSheet failed for ${name}: ${err.message}`);
+    return null;
+  }
+}
+

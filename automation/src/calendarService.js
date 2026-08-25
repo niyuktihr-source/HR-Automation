@@ -288,14 +288,17 @@ async function create30DayCatchupEvent(auth, employee) {
       .filter(Boolean)
       .map(email => ({ email }));
 
+    const catchupLink = employee.catchupSheetUrl || (employee.catchupSheetId ? `https://docs.google.com/spreadsheets/d/${employee.catchupSheetId}` : '');
+    const sheetSection = catchupLink ? `\n\nCatchup Sheet: ${catchupLink}` : '';
+
     const cfg = config.calendarEvents.catchup30day;
     const endMins = cfg.minute + cfg.durationMins;
     const summary = wasRescheduled
       ? `30-Day Catchup ⚠️ (Rescheduled) — ${employee.name}`
       : `30-Day Catchup — ${employee.name}`;
     const description = wasRescheduled
-      ? `30-day catchup call for ${employee.name} (${employee.employeeId}).\n\n⚠️ This meeting was originally scheduled for ${originalDate.toDateString()} and has been rescheduled.\n\nCovers onboarding experience, role clarity, challenges, and initial performance feedback.`
-      : `30-day catchup call for ${employee.name} (${employee.employeeId}). Covers onboarding experience, role clarity, challenges, and initial performance feedback.`;
+      ? `30-day catchup call for ${employee.name} (${employee.employeeId}).\n\n⚠️ This meeting was originally scheduled for ${originalDate.toDateString()} and has been rescheduled.\n\nCovers onboarding experience, role clarity, challenges, and initial performance feedback.${sheetSection}`
+      : `30-day catchup call for ${employee.name} (${employee.employeeId}). Covers onboarding experience, role clarity, challenges, and initial performance feedback.${sheetSection}`;
     const event = {
       summary,
       description,

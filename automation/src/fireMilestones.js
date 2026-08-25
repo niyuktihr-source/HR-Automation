@@ -33,6 +33,7 @@ const {
   markITConfirmed,
   markHRInductionScheduled,
   createEmployeeInfoSheet,
+  getOrCreateCatchupSheet,
 } = require('./statusTracker');
 const { create30DayCatchupEvent, createReviewEvent } = require('./calendarService');
 const { uploadChecklist } = require('./driveWatcher');
@@ -141,6 +142,7 @@ async function run() {
   // ── 25-day catchup ─────────────────────────────────────────────────────────
   if (!isTaskDone('t63')) {
     console.log('\n[4] Firing: 25-day catchup email (t63)');
+    await getOrCreateCatchupSheet(auth, employee).catch(e => console.warn('  Catchup sheet failed:', e.message));
     await send25DayCatchupEmail(employee).catch(e => console.warn('  25-day email failed:', e.message));
     await sendJoineeReviewNotification(employee, 25).catch(e => console.warn('  25-day joinee email failed:', e.message));
     await mark25DayCatchupDone(auth, employee).catch(() => {});
@@ -173,6 +175,7 @@ async function run() {
   // ── 30-day catchup ─────────────────────────────────────────────────────────
   if (!isTaskDone('t43')) {
     console.log('\n[6] Firing: 30-day catchup (t43)');
+    await getOrCreateCatchupSheet(auth, employee).catch(e => console.warn('  Catchup sheet failed:', e.message));
     await create30DayCatchupEvent(auth, employee).catch(e => console.warn('  30-day calendar failed:', e.message));
     await send30DayTechnicalReview(employee).catch(e => console.warn('  30-day email failed:', e.message));
     await sendJoineeReviewNotification(employee, 30).catch(e => console.warn('  30-day joinee email failed:', e.message));

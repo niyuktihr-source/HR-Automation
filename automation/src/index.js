@@ -69,6 +69,7 @@ const {
   renameStatusSheet,
   createProjectIntroSheet,
   createEmployeeInfoSheet,
+  getOrCreateCatchupSheet,
 } = require('./statusTracker');
 const { updateMasterDashboard } = require('./masterDashboard');
 
@@ -886,6 +887,9 @@ async function triggerNextStep(auth, employee, docType) {
     if (!isTaskDone(checklist, 't40')) {
       markAndLog(employee, 't40');
       saveState(employee.employeeId, snapshotEmployee(employee));
+      await getOrCreateCatchupSheet(auth, employee).catch(err =>
+        console.warn(`[Index] Catchup sheet creation failed for ${employee.name}: ${err.message}`)
+      );
       await sendCatchupXLSEmail(employee);
       await uploadChecklist(auth, employee.driveFolderId, checklist);
     }

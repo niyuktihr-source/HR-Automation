@@ -163,8 +163,15 @@ function schedule25DayCatchup(employee, markTaskFn) {
   scheduleDayBeforeReminder(employee, 25, fireDate);
 
   return scheduleOnce(fireDate, `25-Day Catchup — ${name}`, async () => {
-    const { send25DayCatchupEmail } = require('./emailSender');
-    const { mark25DayCatchupDone } = require('./statusTracker');
+    const { send25DayCatchupEmail, sendJoineeReviewNotification } = require('./emailSender');
+    const { getOrCreateCatchupSheet, mark25DayCatchupDone } = require('./statusTracker');
+
+    // Ensure personalized catchup sheet is created from template
+    if (employee._auth) {
+      await getOrCreateCatchupSheet(employee._auth, employee).catch(err =>
+        console.warn(`[Cron] Could not get/create catchup sheet for ${name}: ${err.message}`)
+      );
+    }
 
     // Create calendar invite for joinee + recruiter + manager
     if (employee._auth) {
@@ -180,7 +187,6 @@ function schedule25DayCatchup(employee, markTaskFn) {
     await send25DayCatchupEmail(employee).catch(err =>
       console.warn(`[Cron] 25-day catchup email failed for ${name}: ${err.message}`)
     );
-    const { sendJoineeReviewNotification } = require('./emailSender');
     await sendJoineeReviewNotification(employee, 25).catch(err =>
       console.warn(`[Cron] 25-day joinee notification failed for ${name}: ${err.message}`)
     );
@@ -203,6 +209,16 @@ function schedule30DayCatchup(employee, recruiterEmail, managerEmail, contacts, 
   scheduleDayBeforeReminder(employee, 30, fireDate);
 
   return scheduleOnce(fireDate, `30-Day Catchup — ${name}`, async () => {
+    const { send30DayTechnicalReview } = require('./emailSender');
+    const { getOrCreateCatchupSheet, mark30DayDone } = require('./statusTracker');
+
+    // Ensure personalized catchup sheet is created from template
+    if (employee._auth) {
+      await getOrCreateCatchupSheet(employee._auth, employee).catch(err =>
+        console.warn(`[Cron] Could not get/create catchup sheet for ${name}: ${err.message}`)
+      );
+    }
+
     if (employee._auth) {
       const link = await create30DayCatchupEvent(employee._auth, employee).catch(err => {
         console.error(`[Cron][Calendar] ❌ 30-day calendar invite FAILED for ${name} (${employeeId}): ${err.message}`);
@@ -213,8 +229,7 @@ function schedule30DayCatchup(employee, recruiterEmail, managerEmail, contacts, 
       console.warn(`[Cron][Calendar] ⚠️ 30-day calendar invite SKIPPED for ${name} — no auth on employee object`);
     }
 
-    // Part 1: send review email to manager + joinee, then poll sheet daily until recruiter fills it
-    const { send30DayTechnicalReview } = require('./emailSender');
+    // Part 1: send review email to manager + joinee (with personalized catchup sheet link)
     await send30DayTechnicalReview(employee).catch(err =>
       console.warn(`[Cron] 30-day technical review email failed for ${name}: ${err.message}`)
     );

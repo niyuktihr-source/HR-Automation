@@ -701,6 +701,25 @@ async function sendProjectIntroInvite(employee, sheetUrl) {
   }
 }
 
+// Helper: Resolve or create the personalized catchup sheet URL for an employee
+async function resolveCatchupSheetUrl(employee) {
+  if (employee.catchupSheetUrl) return employee.catchupSheetUrl;
+  if (employee.catchupSheetId) {
+    employee.catchupSheetUrl = `https://docs.google.com/spreadsheets/d/${employee.catchupSheetId}`;
+    return employee.catchupSheetUrl;
+  }
+  if (employee._auth) {
+    try {
+      const { getOrCreateCatchupSheet } = require('./statusTracker');
+      const url = await getOrCreateCatchupSheet(employee._auth, employee);
+      if (url) return url;
+    } catch (e) {
+      console.warn(`[Email] Could not auto-create/get catchup sheet for ${employee.name}: ${e.message}`);
+    }
+  }
+  return null;
+}
+
 // Template 16: 30-day catchup tracker — creates a Google Sheet in Drive + emails link to recruiter + manager (t40)
 async function sendCatchupXLSEmail(employee) {
   const { name, employeeId, contacts, driveFolderId } = employee;
@@ -708,11 +727,13 @@ async function sendCatchupXLSEmail(employee) {
   const managerEmail = contacts && contacts.managerEmail;
   const toEmail = [recruiterEmail, managerEmail].filter(Boolean).join(', ');
 
-  // Reuse the project intro sheet (AL_DI_HR_019) that was created at joining time.
-  // It already contains the Tracking - Month -1/2/3 tabs the manager needs to fill.
-  let sheetUrl = employee.projectIntroSheetId
-    ? `https://docs.google.com/spreadsheets/d/${employee.projectIntroSheetId}`
-    : null;
+  // Look up or create the personalized catchup sheet
+  let sheetUrl = await resolveCatchupSheetUrl(employee);
+
+  // Fallback to project intro sheet if catchup sheet is not available
+  if (!sheetUrl && employee.projectIntroSheetId) {
+    sheetUrl = `https://docs.google.com/spreadsheets/d/${employee.projectIntroSheetId}`;
+  }
 
   // Fallback: look it up by name in Drive if not stored on employee object
   if (!sheetUrl && employee._auth && driveFolderId) {
@@ -720,236 +741,37 @@ async function sendCatchupXLSEmail(employee) {
       const { google } = require('googleapis');
       const drive = google.drive({ version: 'v3', auth: employee._auth });
       const res = await drive.files.list({
-        q: `name contains 'AL_DI_HR_019' and name contains '${employeeId}' and trashed=false`,
+        q: `'${driveFolderId}' in parents and (name contains 'Catchup' or name contains 'AL_DI_HR_019' or name contains 'Tracker') and trashed=false`,
         fields: 'files(id)',
       });
       if (res.data.files.length > 0) {
         sheetUrl = `https://docs.google.com/spreadsheets/d/${res.data.files[0].id}`;
       }
     } catch (err) {
-      console.warn(`[Email] Could not look up project intro sheet for ${name}: ${err.message}`);
+      console.warn(`[Email] Could not look up catchup tracker sheet for ${name}: ${err.message}`);
     }
   }
 
-  if (!sheetUrl && employee._auth && driveFolderId) {
-    try {
-      const { google } = require('googleapis');
-      const sheets = google.sheets({ version: 'v4', auth: employee._auth });
-      const drive = google.drive({ version: 'v3', auth: employee._auth });
-
-      // Create workbook with all 4 tabs up front
-      const spreadsheet = await sheets.spreadsheets.create({
-        requestBody: {
-          properties: { title: `New Joinee & Task Tracker — ${name} (${employeeId})` },
-          sheets: [
-            { properties: { title: 'Document Version history',    index: 0 } },
-            { properties: { title: 'Details of New Joinee & Task', index: 1 } },
-            { properties: { title: 'Tracking - Month -1',          index: 2 } },
-            { properties: { title: 'Tracking - Month -2',          index: 3 } },
-            { properties: { title: 'Tracking - Month -3',          index: 4 } },
-          ],
-        },
-      });
-      const spreadsheetId = spreadsheet.data.spreadsheetId;
-      const tabIds = {};
-      for (const s of spreadsheet.data.sheets) {
-        tabIds[s.properties.title] = s.properties.sheetId;
-      }
-
-      // ── Tab: Details of New Joinee & Task ──────────────────────────────────
-      const dojStr = employee.doj || '';
-      const teamJoined = employee.team || employee.department || '';
-      const reportingManager = (contacts && contacts.managerName) || managerEmail || '';
-      await sheets.spreadsheets.values.update({
-        spreadsheetId,
-        range: "'Details of New Joinee & Task'!A1",
-        valueInputOption: 'USER_ENTERED',
-        requestBody: {
-          values: [
-            ['Details of New Joinee & Task'],
-            [`Name: ${name}\nDOJ: ${dojStr}\nTeam Joined: ${teamJoined}\nReporting Manager: ${reportingManager}\nProject Buddy:`],
-            ['Key Areas of Responsibilities:\n1.\n2.\n3.'],
-            ['Objectives:\n1.\n2.\n3.'],
-            ['Task/ Training Schedule:'],
-            [],
-          ],
-        },
-      });
-
-      // ── Tab: Tracking rows (same structure for Month -1, -2, -3) ──────────
-      const trackingRows = [
-        // Row 1: header (merged A1:C1 — just set in A1)
-        // Row 2-4: Tasks Assigned block + completion % header
-        // Row 5: Lead's Observations | Suggestions headers
-        // Rows 6-10: Performance dimensions
-        // Rows 11-12: blank spacers
-        // Row 13: Filled by Recruiter headers
-        // Rows 14-15: Concern questions
-        // Row 16: Summary
-      ];
-
-      // Month -1: 2 recruiter questions. Month -2 and -3: adds probation question.
-      const buildTrackingData = (monthLabel) => {
-        const hasProbationQ = monthLabel !== 'Tracking - Month -1';
-        const rows = [
-          [monthLabel, '', ''],
-          ['Tasks Assigned', 'Task/ Training 1: Completion Percentage: Mention percentage only (For example 100% )Proficiency achieved on the tasks completed: Task/ Training 2:', ''],
-          ['', '', ''],
-          ['', '', ''],
-          ['', "Lead's Observations on the tasks assigned", 'Suggestions for improvements from the lead'],
-          ['PERSONAL QUALITY\n1.Timely and accurate completion of activities with desired standards\n2.Takes initiative and is innovative\n3.Flexible and effective in taking up new challenges\n4.Response time', '', ''],
-          ['TEAMWORK\nCo-operation with other team members', '', ''],
-          ['LEADERSHIP\nAbility to plan\nOrganize\nDelegate\nControl', '', ''],
-          ['COMMUNICATIONClarity  and Conciseness in one-to-one and group discussions', '', ''],
-          ['Ownership & Accountability', '', ''],
-          ['', '', ''],
-          ['', '', ''],
-          ['Filled by Recruiter', 'Filled by Recruiter', ''],
-          ['Do you have any other concerns apart from technical output which is impacting the work currently ?', '', ''],
-          ['Do you have any concerns on the time taken to complete the assigned tasks/training and/or the quality of the output?', '', ''],
-        ];
-        if (hasProbationQ) {
-          rows.push(['Do you feel the probation will be confirmed or will it be extended ?', '', '']);
-        }
-        rows.push(['', '', '']);
-        rows.push(['Summary', '', '']);
-        rows.push(['', '', '']);
-        return rows;
-      };
-
-      for (const tab of ['Tracking - Month -1', 'Tracking - Month -2', 'Tracking - Month -3']) {
-        await sheets.spreadsheets.values.update({
-          spreadsheetId,
-          range: `'${tab}'!A1`,
-          valueInputOption: 'USER_ENTERED',
-          requestBody: { values: buildTrackingData(tab) },
-        });
-      }
-
-      // ── Formatting ─────────────────────────────────────────────────────────
-      const formatRequests = [];
-
-      // Details tab — title row bold centered
-      const detailsId = tabIds['Details of New Joinee & Task'];
-      formatRequests.push({
-        repeatCell: {
-          range: { sheetId: detailsId, startRowIndex: 0, endRowIndex: 1 },
-          cell: { userEnteredFormat: {
-            textFormat: { bold: true, fontSize: 12 },
-            horizontalAlignment: 'CENTER',
-          }},
-          fields: 'userEnteredFormat(textFormat,horizontalAlignment)',
-        },
-      });
-      // Details tab — wrap all cells
-      formatRequests.push({
-        repeatCell: {
-          range: { sheetId: detailsId, startRowIndex: 0, endRowIndex: 10 },
-          cell: { userEnteredFormat: { wrapStrategy: 'WRAP' } },
-          fields: 'userEnteredFormat(wrapStrategy)',
-        },
-      });
-
-      // Tracking tabs — header row + performance dimension rows light grey background
-      for (const tab of ['Tracking - Month -1', 'Tracking - Month -2', 'Tracking - Month -3']) {
-        const sid = tabIds[tab];
-        // Tab title row bold centered
-        formatRequests.push({
-          repeatCell: {
-            range: { sheetId: sid, startRowIndex: 0, endRowIndex: 1 },
-            cell: { userEnteredFormat: {
-              textFormat: { bold: true, fontSize: 11 },
-              horizontalAlignment: 'CENTER',
-            }},
-            fields: 'userEnteredFormat(textFormat,horizontalAlignment)',
-          },
-        });
-        // Performance dimension rows (rows 6-10, 0-indexed: 5-9) light grey + bold label
-        formatRequests.push({
-          repeatCell: {
-            range: { sheetId: sid, startRowIndex: 5, endRowIndex: 10 },
-            cell: { userEnteredFormat: {
-              backgroundColor: { red: 0.93, green: 0.93, blue: 0.93 },
-              textFormat: { bold: true },
-              wrapStrategy: 'WRAP',
-            }},
-            fields: 'userEnteredFormat(backgroundColor,textFormat,wrapStrategy)',
-          },
-        });
-        // "Filled by Recruiter" row bold
-        formatRequests.push({
-          repeatCell: {
-            range: { sheetId: sid, startRowIndex: 12, endRowIndex: 13 },
-            cell: { userEnteredFormat: { textFormat: { bold: true } } },
-            fields: 'userEnteredFormat(textFormat)',
-          },
-        });
-        // Wrap all content rows
-        formatRequests.push({
-          repeatCell: {
-            range: { sheetId: sid, startRowIndex: 0, endRowIndex: 18 },
-            cell: { userEnteredFormat: { wrapStrategy: 'WRAP' } },
-            fields: 'userEnteredFormat(wrapStrategy)',
-          },
-        });
-        // Auto-resize columns A-C
-        formatRequests.push({
-          autoResizeDimensions: { dimensions: { sheetId: sid, dimension: 'COLUMNS', startIndex: 0, endIndex: 3 } },
-        });
-      }
-
-      await sheets.spreadsheets.batchUpdate({
-        spreadsheetId,
-        requestBody: { requests: formatRequests },
-      });
-
-      // Move into employee's Drive folder
-      const fileMeta = await drive.files.get({ fileId: spreadsheetId, fields: 'parents' });
-      const currentParents = (fileMeta.data.parents || []).join(',');
-      await drive.files.update({
-        fileId: spreadsheetId,
-        addParents: driveFolderId,
-        removeParents: currentParents,
-        fields: 'id, parents',
-      });
-
-      // Share with recruiter and manager only — joinee has no access
-      const shareWithEdit = [recruiterEmail, managerEmail].filter(Boolean);
-      for (const email of [...new Set(shareWithEdit)]) {
-        await drive.permissions.create({
-          fileId: spreadsheetId,
-          requestBody: { type: 'user', role: 'writer', emailAddress: email },
-          sendNotificationEmail: false,
-        }).catch(() => {});
-      }
-
-      sheetUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}`;
-      console.log(`[Email] Catchup tracker sheet created for ${name}: ${sheetUrl}`);
-    } catch (err) {
-      console.warn(`[Email] Could not create catchup XLS sheet for ${name}: ${err.message}`);
-    }
-  } // end fallback sheet creation
-
   const sheetSection = sheetUrl
-    ? `<p style="margin:16px 0;"><a href="${sheetUrl}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;">Open New Joinee & Task Tracker</a></p>
+    ? `<p style="margin:16px 0;"><a href="${sheetUrl}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;">Open Catchup Tracker Sheet</a></p>
        <p style="color:#555;font-size:13px;">The tracker has been saved in ${esc(name)}'s onboarding folder. Please fill in the monthly tracking tabs after each review call.</p>`
     : `<p style="color:#e65100;">The tracker sheet could not be created automatically — please create it manually.</p>`;
 
   // Send to recruiter + manager
   await sendEmail({
     to: toEmail,
-    subject: `New Joinee & Task Tracker — ${esc(name)} (${esc(employeeId)})`,
+    subject: `Catchup Call & Task Tracker — ${esc(name)} (${esc(employeeId)})`,
     html: `
       <p>Hi,</p>
-      <p>Please find the New Joinee & Task Tracker for <strong>${esc(name)}</strong> (ID: ${esc(employeeId)}) below.</p>
+      <p>Please find the Catchup Call & Task Tracker for <strong>${esc(name)}</strong> (ID: ${esc(employeeId)}) below.</p>
       <p>The tracker contains:</p>
       <ul>
-        <li><strong>Details of New Joinee & Task</strong> — Employee info, Key Areas of Responsibilities, Objectives, Task/Training Schedule (to be filled by manager)</li>
+        <li><strong>Details of New Joinee & Task</strong> — Employee info, Key Areas of Responsibilities, Objectives, Task/Training Schedule</li>
         <li><strong>Tracking - Month -1/2/3</strong> — Monthly performance tracking with tasks, lead observations, and recruiter feedback sections</li>
       </ul>
       ${sheetSection}
       <p>Please fill in the relevant month tab after each catchup call (30-day, 60-day, and 90-day reviews).</p>
-      <p>Regards,<br/>${process.env.COMPANY_NAME} HR</p>
+      <p>Regards,<br/>${esc(process.env.COMPANY_NAME || '')} HR</p>
     `,
   });
 
@@ -1013,7 +835,7 @@ async function sendReviewSummaryRequest(employee, dayMark) {
   });
 }
 
-// Template 18c2: Day 30 technical review
+// Template 18c2: Day 30 technical review & catchup call
 async function send30DayTechnicalReview(employee) {
   const { name, employeeId, contacts } = employee;
   const co = esc(process.env.COMPANY_NAME || '');
@@ -1021,15 +843,16 @@ async function send30DayTechnicalReview(employee) {
   const managerEmail = contacts && contacts.managerEmail;
   const monthTab = 'Tracking - Month -1';
 
-  // Find tracking sheet URL
-  let sheetUrl = employee.projectIntroSheetId
-    ? `https://docs.google.com/spreadsheets/d/${employee.projectIntroSheetId}`
-    : null;
+  // Find personalized catchup sheet URL
+  let sheetUrl = await resolveCatchupSheetUrl(employee);
+  if (!sheetUrl && employee.projectIntroSheetId) {
+    sheetUrl = `https://docs.google.com/spreadsheets/d/${employee.projectIntroSheetId}`;
+  }
   if (!sheetUrl && employee._auth && employee.driveFolderId) {
     try {
       const drive = google.drive({ version: 'v3', auth: employee._auth });
       const res = await drive.files.list({
-        q: `'${employee.driveFolderId}' in parents and name contains 'New Joinee' and trashed=false`,
+        q: `'${employee.driveFolderId}' in parents and (name contains 'Catchup' or name contains 'New Joinee') and trashed=false`,
         fields: 'files(id)',
         pageSize: 5,
       });
@@ -1040,53 +863,60 @@ async function send30DayTechnicalReview(employee) {
       console.warn(`[Email] Could not look up tracking sheet for ${name}: ${err.message}`);
     }
   }
-  const sheetSection = sheetUrl
-    ? `<p style="margin:16px 0;"><a href="${sheetUrl}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;">Open Tracking Sheet — ${esc(monthTab)}</a></p>`
+
+  const managerSheetSection = sheetUrl
+    ? `<p style="margin:16px 0;"><a href="${sheetUrl}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;display:inline-block;">Open 30-Day Catchup Sheet — ${esc(monthTab)}</a></p>`
+    : '';
+
+  const joineeSheetSection = sheetUrl
+    ? `<p style="margin:16px 0;"><a href="${sheetUrl}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;display:inline-block;">Open 30-Day Catchup Sheet</a></p>`
     : '';
 
   // Manager email — with tracking sheet
   if (managerEmail) {
     await sendEmail({
       to: managerEmail,
-      subject: `Reminder — 30-Day Project Review for ${esc(name)} (${esc(employeeId)})`,
+      subject: `Reminder — 30-Day Catchup & Project Review for ${esc(name)} (${esc(employeeId)})`,
       html: `
         <p>Hi,</p>
-        <p>The <strong>30-day project review</strong> for <strong>${esc(name)}</strong> (ID: ${esc(employeeId)}) is due.</p>
-        <p>Please schedule and conduct the review. After the call:</p>
+        <p>The <strong>30-day catchup call and project review</strong> for <strong>${esc(name)}</strong> (ID: ${esc(employeeId)}) is due.</p>
+        <p>Please conduct the catchup call. After the call:</p>
         <ol>
-          <li>Fill in the <strong>${esc(monthTab)}</strong> tab in the tracking sheet below</li>
+          <li>Fill in the <strong>${esc(monthTab)}</strong> tab in the catchup tracking sheet below</li>
           <li>Reply to this email confirming the review was completed</li>
         </ol>
-        ${sheetSection}
+        ${managerSheetSection}
         <p>If the call cannot happen soon, reply with the new proposed date.</p>
         <p>Regards,<br/>${co} HR</p>
       `,
     });
   }
 
-  // Joinee email — simple notification
+  // Joinee email — with personalized catchup sheet link
   if (joineeEmail) {
     await sendEmail({
       to: joineeEmail,
-      subject: `30-Day Project Review — ${esc(name)} (${esc(employeeId)})`,
+      subject: `30-Day Catchup Call & Review — ${esc(name)} (${esc(employeeId)})`,
       html: `
-        <p>Hi,</p>
-        <p>It has been 30 days since you joined ${co}. Time for your <strong>30-day project review!</strong></p>
-        <p>Please check your calendar for the review meeting invite and come prepared to discuss progress, challenges, and next steps.</p>
+        <p>Hi ${esc(name)},</p>
+        <p>It has been 30 days since you joined ${co}. Time for your <strong>30-day catchup call and project review!</strong></p>
+        <p>Your recruiter and reporting manager will connect with you. Please check your calendar for the review meeting invite and review your personalized catchup sheet:</p>
+        ${joineeSheetSection}
+        <p>Please come prepared to discuss your progress, any challenges, and goals for the next month.</p>
         <p>Regards,<br/>${co} HR</p>
       `,
     });
   }
 }
 
-// Template 18c: Day 25 catchup call notification — sent to HR + new joiner on day 25
+// Template 18c: Day 25 catchup call notification — sent to HR + recruiter on day 25
 async function send25DayCatchupEmail(employee) {
   const { name, employeeId, doj, isFresher } = employee;
   const co = esc(process.env.COMPANY_NAME || '');
   const hrEmailAddr = resolveHrEmail(employee);
   const recruiterEmail = (employee.contacts || {}).recruiterEmail || '';
   const toEmail = [hrEmailAddr, recruiterEmail].filter(Boolean).join(', ');
-  const sheetLink = process.env.CATCHUP_TRACKING_SHEET_LINK || '#';
+  const sheetLink = (await resolveCatchupSheetUrl(employee)) || process.env.CATCHUP_TRACKING_SHEET_LINK || '#';
   const contacts = employee.contacts || {};
   const managerEmail = contacts.managerEmail || '';
   const managerName  = contacts.managerName  || managerEmail;
@@ -1331,12 +1161,20 @@ async function sendJoineeReviewNotification(employee, dayMark) {
 
   const labels = {
     25: { subject: `Your 25-Day Catchup Call — ${esc(name)}`, body: `This is a reminder that your <strong>25-day catchup call</strong> is scheduled. Your recruiter will reach out to connect with you. Please be available and share any feedback or concerns you have so far.` },
-    30: { subject: `Your 30-Day Review — ${esc(name)}`, body: `You have completed <strong>30 days</strong> at ${co}! Your 30-day project review call is coming up. Your manager and recruiter will connect with you to discuss your progress, challenges, and goals for the next month.` },
+    30: { subject: `Your 30-Day Catchup Call & Review — ${esc(name)}`, body: `You have completed <strong>30 days</strong> at ${co}! Your 30-day catchup call with your recruiter and reporting manager is scheduled. They will connect with you to discuss your progress, challenges, and goals for the next month.` },
     60: { subject: `Your 60-Day Review — ${esc(name)}`, body: `You have completed <strong>60 days</strong> at ${co}! Your 60-day review call is scheduled. Your manager and recruiter will discuss your project progress and set goals for the next phase.` },
     90: { subject: `Your 90-Day Review — ${esc(name)}`, body: `You have completed <strong>90 days</strong> at ${co}! Your 90-day review call is coming up. This is your final probation review — your manager and recruiter will assess your progress and confirm probation clearance.` },
   };
 
   const { subject, body } = labels[dayMark] || { subject: `Review Call — ${esc(name)}`, body: `Your ${dayMark}-day review is scheduled.` };
+
+  let sheetSection = '';
+  if (dayMark === 25 || dayMark === 30) {
+    const sheetUrl = await resolveCatchupSheetUrl(employee);
+    if (sheetUrl) {
+      sheetSection = `<p style="margin:16px 0;"><a href="${sheetUrl}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;display:inline-block;">Open Catchup Sheet</a></p>`;
+    }
+  }
 
   return sendEmail({
     to,
@@ -1344,6 +1182,7 @@ async function sendJoineeReviewNotification(employee, dayMark) {
     html: `
       <p>Hi ${esc(name)},</p>
       <p>${body}</p>
+      ${sheetSection}
       <p>If you have any questions or concerns before the call, feel free to reach out to HR.</p>
       <p>Regards,<br/>${co} HR</p>
     `,
