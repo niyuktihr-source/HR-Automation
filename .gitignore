@@ -6,3 +6,6 @@ automation/employees.json
 bills/processed_bills.json
 ngrok.exe
 ngrok.zip
+/test_scripts/
+automation/verify_local_calendar.js
+automation/test_scripts/live_link_delivery.js

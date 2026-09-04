@@ -177,6 +177,9 @@ function snapshotEmployee(employee) {
     statusSheetId: employee.statusSheetId || null,
     projectIntroSheetId: employee.projectIntroSheetId || null,
     employeeInfoSheetId: employee.employeeInfoSheetId || null,
+    catchupSheetId: employee.catchupSheetId || null,
+    catchupSheetUrl: employee.catchupSheetUrl || null,
+    meetLinks: employee.meetLinks || {},
     verificationResults: employee.verificationResults || {},
     extractedData: employee.extractedData || {},
     processedFileIds: Array.from(employee.processedFileIds || []),
@@ -186,6 +189,9 @@ function snapshotEmployee(employee) {
     preOnboardingFormSentAt: employee.preOnboardingFormSentAt || null,
     status: employee.status || 'active',
     statusReason: employee.statusReason || '',
+    scheduledActions: employee._scheduledActions || {},
+    createdActions: employee._createdActions || {},
+    calendarActions: employee._calendarActions || {},
   };
 }
 
@@ -1789,6 +1795,9 @@ const employeeRegistry = {};
 async function onboardEmployee(auth, employee) {
   // Register in shared registry so webhookServer can look them up
   employeeRegistry[employee.employeeId] = employee;
+  employee._scheduledActions = employee.scheduledActions || employee._scheduledActions || {};
+  employee._createdActions = employee.createdActions || employee._createdActions || {};
+  employee._calendarActions = employee.calendarActions || employee._calendarActions || {};
   // Store auth and markTask helper on employee so cron callbacks can update checklist/sheet
   employee._auth = auth;
   employee._markTask = (taskId) => markAndLog(employee, taskId);
@@ -2427,6 +2436,9 @@ async function main() {
         statusSheetId: saved ? (saved.statusSheetId || null) : null,
         projectIntroSheetId: saved ? (saved.projectIntroSheetId || null) : null,
         employeeInfoSheetId: saved ? (saved.employeeInfoSheetId || null) : null,
+        catchupSheetId: saved ? (saved.catchupSheetId || null) : null,
+        catchupSheetUrl: saved ? (saved.catchupSheetUrl || null) : null,
+        meetLinks: saved ? (saved.meetLinks || {}) : {},
         verificationResults: saved ? (saved.verificationResults || {}) : {},
         extractedData: saved ? (saved.extractedData || {}) : {},
         replyTimerExpiry: saved ? (saved.replyTimerExpiry || {}) : {},
@@ -2490,6 +2502,9 @@ async function main() {
       if (!employee.statusSheetId && saved && saved.statusSheetId) employee.statusSheetId = saved.statusSheetId;
       if (!employee.projectIntroSheetId && saved && saved.projectIntroSheetId) employee.projectIntroSheetId = saved.projectIntroSheetId;
       if (!employee.employeeInfoSheetId && saved && saved.employeeInfoSheetId) employee.employeeInfoSheetId = saved.employeeInfoSheetId;
+      if (!employee.catchupSheetId && saved && saved.catchupSheetId) employee.catchupSheetId = saved.catchupSheetId;
+      if (!employee.catchupSheetUrl && saved && saved.catchupSheetUrl) employee.catchupSheetUrl = saved.catchupSheetUrl;
+      if (!employee.meetLinks && saved && saved.meetLinks) employee.meetLinks = saved.meetLinks;
       if (saved && saved.milestonesScheduled && !employee.milestonesScheduled) employee.milestonesScheduled = true;
       if (saved && saved.verificationResults) employee.verificationResults = saved.verificationResults;
       if (saved && saved.extractedData) employee.extractedData = saved.extractedData;

@@ -86,7 +86,7 @@ async function run() {
   console.log('  ✓ Feedback form email sent to joinee');
 
   // Send 25-day catchup email to HR/recruiter
-  await send25DayCatchupEmail(employee).catch(e => console.warn('  25-day catchup HR email failed:', e.message));
+  await send25DayCatchupEmail(employee, { meetLink: employee.meetLinks && employee.meetLinks['25day-catchup'] }).catch(e => console.warn('  25-day catchup HR email failed:', e.message));
   console.log('  ✓ 25-day catchup email sent to HR');
 
   // Mark sheet milestone Done

@@ -11,6 +11,7 @@ push-channels.json
 gmail-state.json
 seen-files.json
 seen-files-meta.json
+/test_scripts/
 
 # ─── Dependencies ─────────────────────────────────────────────────────────────
 node_modules/
