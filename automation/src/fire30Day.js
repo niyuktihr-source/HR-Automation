@@ -49,7 +49,7 @@ async function run() {
   console.log('  ✓ 30-day calendar event created');
 
   // Send technical review email to manager + joinee
-  await send30DayTechnicalReview(employee).catch(e => console.warn('  30-day email failed:', e.message));
+  await send30DayTechnicalReview(employee, { meetLink: employee.meetLinks && employee.meetLinks['30day-catchup'] }).catch(e => console.warn('  30-day email failed:', e.message));
   console.log('  ✓ 30-day technical review email sent');
 
   // Mark sheet milestone Done

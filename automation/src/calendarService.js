@@ -3,6 +3,7 @@
 
 const { google } = require('googleapis');
 const config = require('./config');
+const crypto = require('crypto');
 
 // ─── Internal helpers ──────────────────────────────────────────────────────────
 
@@ -78,6 +79,139 @@ function parsePreferredTime(str) {
   return { hour, minute };
 }
 
+function hasChecklistTaskDone(employee, taskId) {
+  if (!employee || !taskId || !employee.checklist) return false;
+  for (const phase of Object.values(employee.checklist)) {
+    if (phase && phase.tasks && phase.tasks[taskId] && phase.tasks[taskId].done) return true;
+  }
+  return false;
+}
+
+function isDuplicateCalendarAction(employee, actionKey) {
+  if (!employee || !employee.employeeId || !actionKey) return false;
+  const key = String(actionKey);
+
+  const taskMap = {
+    'hr-induction': 't28',
+    'project-intro': 't32',
+    '25day-catchup': 't65',
+    '30day-catchup': 't45',
+    '60day-review': 't48',
+    '90day-review': 't51',
+  };
+
+  if (taskMap[key] && hasChecklistTaskDone(employee, taskMap[key])) {
+    return true;
+  }
+
+  employee._createdActions = employee._createdActions || {};
+  employee._calendarActions = employee._calendarActions || {};
+
+  if (employee._createdActions[key] || employee._calendarActions[key]) {
+    return true;
+  }
+
+  return false;
+}
+
+function markCalendarActionHandled(employee, actionKey, eventId) {
+  if (!employee || !employee.employeeId || !actionKey) return;
+  const key = String(actionKey);
+  employee._createdActions = employee._createdActions || {};
+  employee._calendarActions = employee._calendarActions || {};
+  employee._createdActions[key] = true;
+  employee._calendarActions[key] = eventId || true;
+}
+
+function calendarAutomationKey(employee, actionKey) {
+  return `${employee.employeeId}:${actionKey}:${employee.doj || 'unknown-doj'}`;
+}
+
+function deterministicEventId(automationKey) {
+  return `hr${crypto.createHash('sha256').update(automationKey).digest('hex')}`;
+}
+
+function getMeetLink(event) {
+  if (!event) return null;
+  if (event.hangoutLink) return event.hangoutLink;
+  const entryPoint = (event.conferenceData && event.conferenceData.entryPoints || [])
+    .find(point => point.entryPointType === 'video' && point.uri);
+  return entryPoint ? entryPoint.uri : null;
+}
+
+function persistCalendarEvent(employee, actionKey, event) {
+  markCalendarActionHandled(employee, actionKey, event && event.id);
+  const meetLink = getMeetLink(event);
+  if (meetLink) {
+    employee.meetLinks = employee.meetLinks || {};
+    employee.meetLinks[actionKey] = meetLink;
+  }
+  if (employee._saveState) employee._saveState();
+}
+
+async function insertCalendarEvent(calendar, employee, actionKey, event) {
+  const automationKey = calendarAutomationKey(employee, actionKey);
+  const eventId = deterministicEventId(automationKey);
+  const resource = {
+    ...event,
+    id: eventId,
+    conferenceData: event.conferenceData || {
+      createRequest: {
+        requestId: eventId,
+        conferenceSolutionKey: { type: 'hangoutsMeet' }
+      }
+    },
+    extendedProperties: {
+      ...(event.extendedProperties || {}),
+      private: {
+        ...((event.extendedProperties && event.extendedProperties.private) || {}),
+        automationKey,
+      },
+    },
+  };
+
+  try {
+    const existing = await calendar.events.get({ calendarId: 'primary', eventId });
+    persistCalendarEvent(employee, actionKey, existing.data);
+    console.log(`[Calendar] Existing event reused for ${employee.name}: ${existing.data.htmlLink}`);
+    return existing;
+  } catch (err) {
+    if (err.code !== 404) throw err;
+  }
+
+  const legacy = await calendar.events.list({
+    calendarId: 'primary',
+    privateExtendedProperty: [`automationKey=${automationKey}`],
+    maxResults: 1,
+    singleEvents: false,
+  });
+  if (legacy.data.items && legacy.data.items.length > 0) {
+    const existing = { data: legacy.data.items[0] };
+    persistCalendarEvent(employee, actionKey, existing.data);
+    console.log(`[Calendar] Legacy event reused for ${employee.name}: ${existing.data.htmlLink}`);
+    return existing;
+  }
+
+  try {
+    const created = await calendar.events.insert({
+      calendarId: 'primary',
+      resource,
+      sendUpdates: 'all',
+      conferenceDataVersion: 1, // Required to generate Meet links
+    });
+
+    persistCalendarEvent(employee, actionKey, created.data);
+    return created;
+  } catch (err) {
+    // Another process may have won the insert race using the same stable ID.
+    if (err.code !== 409) throw err;
+    const existing = await calendar.events.get({ calendarId: 'primary', eventId });
+    persistCalendarEvent(employee, actionKey, existing.data);
+    console.log(`[Calendar] Existing event reused after insert race for ${employee.name}: ${existing.data.htmlLink}`);
+    return existing;
+  }
+}
+
 // ─── Exported calendar functions ───────────────────────────────────────────────
 
 /**
@@ -88,7 +222,13 @@ function parsePreferredTime(str) {
  * Returns the event htmlLink, or null on failure.
  */
 async function createHRInductionEvent(auth, employee) {
+  const actionKey = 'hr-induction';
   try {
+    if (isDuplicateCalendarAction(employee, actionKey)) {
+      console.log(`[Calendar] Duplicate event skipped for ${employee.employeeId}: ${actionKey}`);
+      return null;
+    }
+
     const calendar = google.calendar({ version: 'v3', auth });
     const dojDate = new Date(employee.doj);
     if (!employee.doj || isNaN(dojDate.getTime())) {
@@ -127,12 +267,7 @@ async function createHRInductionEvent(auth, employee) {
       guestsCanSeeOtherGuests: true,
     };
 
-    const res = await calendar.events.insert({
-      calendarId: 'primary',
-      resource: event,
-      sendUpdates: 'all',
-    });
-
+    const res = await insertCalendarEvent(calendar, employee, actionKey, event);
     console.log(`[Calendar] HR Induction event created for ${employee.name}: ${res.data.htmlLink}`);
     return res.data.htmlLink;
   } catch (err) {
@@ -150,7 +285,13 @@ async function createHRInductionEvent(auth, employee) {
  * Returns the event htmlLink, or null on failure.
  */
 async function createProjectIntroEvent(auth, employee) {
+  const actionKey = 'project-intro';
   try {
+    if (isDuplicateCalendarAction(employee, actionKey)) {
+      console.log(`[Calendar] Duplicate event skipped for ${employee.employeeId}: ${actionKey}`);
+      return null;
+    }
+
     const calendar = google.calendar({ version: 'v3', auth });
     const dojDate = new Date(employee.doj);
     if (!employee.doj || isNaN(dojDate.getTime())) {
@@ -188,12 +329,7 @@ async function createProjectIntroEvent(auth, employee) {
       guestsCanSeeOtherGuests: true,
     };
 
-    const res = await calendar.events.insert({
-      calendarId: 'primary',
-      resource: event,
-      sendUpdates: 'all',
-    });
-
+    const res = await insertCalendarEvent(calendar, employee, actionKey, event);
     console.log(`[Calendar] Project Intro event created for ${employee.name}: ${res.data.htmlLink}`);
     return res.data.htmlLink;
   } catch (err) {
@@ -207,7 +343,13 @@ async function createProjectIntroEvent(auth, employee) {
  * Sent to new joinee + recruiter. Returns { htmlLink, eventDate } or null on failure.
  */
 async function create25DayCatchupEvent(auth, employee) {
+  const actionKey = '25day-catchup';
   try {
+    if (isDuplicateCalendarAction(employee, actionKey)) {
+      console.log(`[Calendar] Duplicate event skipped for ${employee.employeeId}: ${actionKey}`);
+      return null;
+    }
+
     const calendar = google.calendar({ version: 'v3', auth });
     const dojDate = new Date(employee.doj);
     if (!employee.doj || isNaN(dojDate.getTime())) {
@@ -247,12 +389,7 @@ async function create25DayCatchupEvent(auth, employee) {
       guestsCanInviteOthers: false,
     };
 
-    const res = await calendar.events.insert({
-      calendarId: 'primary',
-      resource: event,
-      sendUpdates: 'all',
-    });
-
+    const res = await insertCalendarEvent(calendar, employee, actionKey, event);
     console.log(`[Calendar] 25-Day Catchup event created for ${employee.name}: ${res.data.htmlLink}`);
     return { htmlLink: res.data.htmlLink, eventDate };
   } catch (err) {
@@ -266,7 +403,13 @@ async function create25DayCatchupEvent(auth, employee) {
  * Returns the event htmlLink, or null on failure.
  */
 async function create30DayCatchupEvent(auth, employee) {
+  const actionKey = '30day-catchup';
   try {
+    if (isDuplicateCalendarAction(employee, actionKey)) {
+      console.log(`[Calendar] Duplicate event skipped for ${employee.employeeId}: ${actionKey}`);
+      return null;
+    }
+
     const calendar = google.calendar({ version: 'v3', auth });
     const dojDate = new Date(employee.doj);
     if (!employee.doj || isNaN(dojDate.getTime())) {
@@ -309,12 +452,7 @@ async function create30DayCatchupEvent(auth, employee) {
       guestsCanInviteOthers: false,
     };
 
-    const res = await calendar.events.insert({
-      calendarId: 'primary',
-      resource: event,
-      sendUpdates: 'all',
-    });
-
+    const res = await insertCalendarEvent(calendar, employee, actionKey, event);
     console.log(`[Calendar] 30-Day Catchup event created for ${employee.name}: ${res.data.htmlLink}`);
     return res.data.htmlLink;
   } catch (err) {
@@ -329,7 +467,13 @@ async function create30DayCatchupEvent(auth, employee) {
  * Returns the event htmlLink, or null on failure.
  */
 async function createReviewEvent(auth, employee, dayMark) {
+  const actionKey = `${dayMark}day-review`;
   try {
+    if (isDuplicateCalendarAction(employee, actionKey)) {
+      console.log(`[Calendar] Duplicate event skipped for ${employee.employeeId}: ${actionKey}`);
+      return null;
+    }
+
     const calendar = google.calendar({ version: 'v3', auth });
     const dojDate = new Date(employee.doj);
     if (!employee.doj || isNaN(dojDate.getTime())) {
@@ -369,12 +513,7 @@ async function createReviewEvent(auth, employee, dayMark) {
       guestsCanInviteOthers: false,
     };
 
-    const res = await calendar.events.insert({
-      calendarId: 'primary',
-      resource: event,
-      sendUpdates: 'all',
-    });
-
+    const res = await insertCalendarEvent(calendar, employee, actionKey, event);
     console.log(`[Calendar] ${dayMark}-Day Review event created for ${employee.name}: ${res.data.htmlLink}`);
     return res.data.htmlLink;
   } catch (err) {

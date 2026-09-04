@@ -30,6 +30,51 @@ function isTaskDone(checklist, taskId) {
 // Structure: { [employeeId]: { tasks: cron.ScheduledTask[], employee: {}, milestones: {} } }
 const activeJobs = {};
 
+// Small, narrow duplicate guard for milestone creation.
+// It checks: employee state, task done state, and a lightweight in-memory action registry.
+// actionKey examples: 'survey', '25day', '30day-review', 'hr-induction'
+function isDuplicateAction(employee, actionKey) {
+  if (!employee || !employee.employeeId || !actionKey) return false;
+  const key = String(actionKey);
+
+  // If the task is already done in the checklist, it should not be re-created.
+  if (/^t\d+$/.test(key)) {
+    if (isTaskDone(employee.checklist, key)) return true;
+  }
+
+  employee._scheduledActions = employee._scheduledActions || {};
+  employee._createdActions = employee._createdActions || {};
+
+  if (employee._scheduledActions[key] || employee._createdActions[key]) {
+    return true;
+  }
+
+  return false;
+}
+
+function markActionHandled(employee, actionKey) {
+  if (!employee || !employee.employeeId || !actionKey) return;
+  const key = String(actionKey);
+  employee._scheduledActions = employee._scheduledActions || {};
+  employee._createdActions = employee._createdActions || {};
+  employee._scheduledActions[key] = true;
+  employee._createdActions[key] = true;
+}
+
+function scheduleActionOnce(employee, actionKey, factoryFn) {
+  if (!employee || !employee.employeeId || !factoryFn) return null;
+  if (isDuplicateAction(employee, actionKey)) {
+    console.log(`[Cron] Duplicate action skipped for ${employee.employeeId}: ${actionKey}`);
+    return null;
+  }
+
+  const task = factoryFn();
+  if (task) {
+    markActionHandled(employee, actionKey);
+  }
+  return task;
+}
+
 // Return a Date that is `days` calendar days after the given Date
 function addDays(date, days) {
   const d = new Date(date);
@@ -184,10 +229,10 @@ function schedule25DayCatchup(employee, markTaskFn) {
       console.warn(`[Cron][Calendar] ⚠️ 25-day calendar invite SKIPPED for ${name} — no auth on employee object`);
     }
 
-    await send25DayCatchupEmail(employee).catch(err =>
+    await send25DayCatchupEmail(employee, { meetLink: employee.meetLinks && employee.meetLinks['25day-catchup'] }).catch(err =>
       console.warn(`[Cron] 25-day catchup email failed for ${name}: ${err.message}`)
     );
-    await sendJoineeReviewNotification(employee, 25).catch(err =>
+    await sendJoineeReviewNotification(employee, 25, { meetLink: employee.meetLinks && employee.meetLinks['25day-catchup'] }).catch(err =>
       console.warn(`[Cron] 25-day joinee notification failed for ${name}: ${err.message}`)
     );
     console.log(`[Cron] 25-day catchup email sent for ${name} (${employeeId})`);
@@ -230,7 +275,7 @@ function schedule30DayCatchup(employee, recruiterEmail, managerEmail, contacts, 
     }
 
     // Part 1: send review email to manager + joinee (with personalized catchup sheet link)
-    await send30DayTechnicalReview(employee).catch(err =>
+    await send30DayTechnicalReview(employee, { meetLink: employee.meetLinks && employee.meetLinks['30day-catchup'] }).catch(err =>
       console.warn(`[Cron] 30-day technical review email failed for ${name}: ${err.message}`)
     );
     console.log(`[Cron] 30-day technical review email sent for ${name} (${employeeId})`);
@@ -505,12 +550,12 @@ function scheduleAllMilestones(employee, contacts, markTaskFn) {
   const { recruiterEmail, managerEmail, itEmail } = contacts;
 
   const tasks = [
-    scheduleOnboardingSurvey(employee, markTaskFn),
-    schedule25DayCatchup(employee, markTaskFn),
-    schedule30DayCatchup(employee, recruiterEmail, managerEmail, contacts, markTaskFn),
-    schedule60DayReview(employee, recruiterEmail, managerEmail, contacts, markTaskFn),
-    schedule90DayReview(employee, recruiterEmail, managerEmail, contacts, markTaskFn),
-    schedule5MonthProbation(employee, managerEmail),
+    scheduleActionOnce(employee, 'survey', () => scheduleOnboardingSurvey(employee, markTaskFn)),
+    scheduleActionOnce(employee, '25day', () => schedule25DayCatchup(employee, markTaskFn)),
+    scheduleActionOnce(employee, '30day', () => schedule30DayCatchup(employee, recruiterEmail, managerEmail, contacts, markTaskFn)),
+    scheduleActionOnce(employee, '60day', () => schedule60DayReview(employee, recruiterEmail, managerEmail, contacts, markTaskFn)),
+    scheduleActionOnce(employee, '90day', () => schedule90DayReview(employee, recruiterEmail, managerEmail, contacts, markTaskFn)),
+    scheduleActionOnce(employee, '5month', () => schedule5MonthProbation(employee, managerEmail)),
   ].filter(Boolean);
 
   activeJobs[employeeId] = { tasks, employee, contacts };
@@ -547,42 +592,42 @@ function restoreMilestonesAfterRestart(employee, contacts, completedMilestones, 
   const tasks = [];
 
   if (!done.has('t38')) {
-    const t = scheduleOnboardingSurvey(employee, markTaskFn);
+    const t = scheduleActionOnce(employee, 'survey', () => scheduleOnboardingSurvey(employee, markTaskFn));
     if (t) tasks.push(t);
   } else {
     console.log(`[Cron]   Skipping onboarding survey (t38 already done)`);
   }
 
   if (!done.has('t63')) {
-    const t = schedule25DayCatchup(employee, markTaskFn);
+    const t = scheduleActionOnce(employee, '25day', () => schedule25DayCatchup(employee, markTaskFn));
     if (t) tasks.push(t);
   } else {
     console.log(`[Cron]   Skipping 25-day catchup (t63 already done)`);
   }
 
   if (!done.has('t43')) {
-    const t = schedule30DayCatchup(employee, recruiterEmail, managerEmail, contacts, markTaskFn);
+    const t = scheduleActionOnce(employee, '30day', () => schedule30DayCatchup(employee, recruiterEmail, managerEmail, contacts, markTaskFn));
     if (t) tasks.push(t);
   } else {
     console.log(`[Cron]   Skipping 30-day catchup (t43 already done)`);
   }
 
   if (!done.has('t48')) {
-    const t = schedule60DayReview(employee, recruiterEmail, managerEmail, contacts, markTaskFn);
+    const t = scheduleActionOnce(employee, '60day', () => schedule60DayReview(employee, recruiterEmail, managerEmail, contacts, markTaskFn));
     if (t) tasks.push(t);
   } else {
     console.log(`[Cron]   Skipping 60-day review (t48 already done)`);
   }
 
   if (!done.has('t51')) {
-    const t = schedule90DayReview(employee, recruiterEmail, managerEmail, contacts, markTaskFn);
+    const t = scheduleActionOnce(employee, '90day', () => schedule90DayReview(employee, recruiterEmail, managerEmail, contacts, markTaskFn));
     if (t) tasks.push(t);
   } else {
     console.log(`[Cron]   Skipping 90-day review (t51 already done)`);
   }
 
   if (!done.has('t52')) {
-    const t = schedule5MonthProbation(employee, managerEmail);
+    const t = scheduleActionOnce(employee, '5month', () => schedule5MonthProbation(employee, managerEmail));
     if (t) tasks.push(t);
   } else {
     console.log(`[Cron]   Skipping pre-probation (t52 already done)`);
@@ -795,6 +840,7 @@ function scheduleManagerSheetReminder(employee, managerEmail, sheetUrl, label, s
 }
 
 module.exports = {
+  scheduleActionOnce,
   scheduleAllMilestones,
   scheduleNoResponseAlert,
   scheduleDocumentReminders,

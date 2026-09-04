@@ -778,7 +778,7 @@ async function sendCatchupXLSEmail(employee) {
 }
 
 // Template 17: 30/60/90-day review email — single email with tracking sheet link
-async function sendReviewSummaryRequest(employee, dayMark) {
+async function sendReviewSummaryRequest(employee, dayMark, calendarLinks = {}) {
   const { name, employeeId, contacts } = employee;
   const recruiterEmail = contacts && contacts.recruiterEmail;
   const managerEmail = contacts && contacts.managerEmail;
@@ -818,6 +818,10 @@ async function sendReviewSummaryRequest(employee, dayMark) {
        </p>
        <p style="color:#555;font-size:13px;">Please fill in the <strong>${esc(monthTab)}</strong> tab after the review call.</p>`
     : `<p style="color:#e65100;font-size:13px;">Tracking sheet not found — please fill it in manually from the employee's Drive folder.</p>`;
+  const meetLink = calendarLinks.meetLink || (employee.meetLinks && employee.meetLinks[`${dayMark}day-review`]) || null;
+  const meetSection = meetLink
+    ? `<p style="margin:16px 0;"><a href="${meetLink}" style="background:#0F9D58;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;display:inline-block;">Join Google Meet</a></p>`
+    : '';
 
   return sendEmail({
     to: toEmail,
@@ -827,6 +831,7 @@ async function sendReviewSummaryRequest(employee, dayMark) {
       <p>The <strong>${dayMark}-day project review</strong> for <strong>${esc(name)}</strong> (ID: ${esc(employeeId)}) is due. Please check your calendar for the meeting invite.</p>
       <p>After the review, please fill in the tracking sheet for <strong>${monthLabel}</strong>:</p>
       ${sheetSection}
+      ${meetSection}
       <p style="color:#555;border-left:4px solid #ffa000;padding:8px 16px;background:#fffde7;">
         Once the review is done, reply to this email with <strong>"Confirmed"</strong> to update the onboarding checklist.
       </p>
@@ -836,7 +841,7 @@ async function sendReviewSummaryRequest(employee, dayMark) {
 }
 
 // Template 18c2: Day 30 technical review & catchup call
-async function send30DayTechnicalReview(employee) {
+async function send30DayTechnicalReview(employee, calendarLinks = {}) {
   const { name, employeeId, contacts } = employee;
   const co = esc(process.env.COMPANY_NAME || '');
   const joineeEmail = employee.officialEmail || employee.personalEmail;
@@ -872,6 +877,11 @@ async function send30DayTechnicalReview(employee) {
     ? `<p style="margin:16px 0;"><a href="${sheetUrl}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;display:inline-block;">Open 30-Day Catchup Sheet</a></p>`
     : '';
 
+  const meetLink = calendarLinks.meetLink || (employee.meetLinks && employee.meetLinks['30day-catchup']) || null;
+  const meetSection = meetLink
+    ? `<p style="margin:16px 0;"><a href="${meetLink}" style="background:#0F9D58;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;display:inline-block;">Join Google Meet</a></p>`
+    : '';
+
   // Manager email — with tracking sheet
   if (managerEmail) {
     await sendEmail({
@@ -886,6 +896,7 @@ async function send30DayTechnicalReview(employee) {
           <li>Reply to this email confirming the review was completed</li>
         </ol>
         ${managerSheetSection}
+        ${meetSection}
         <p>If the call cannot happen soon, reply with the new proposed date.</p>
         <p>Regards,<br/>${co} HR</p>
       `,
@@ -902,6 +913,7 @@ async function send30DayTechnicalReview(employee) {
         <p>It has been 30 days since you joined ${co}. Time for your <strong>30-day catchup call and project review!</strong></p>
         <p>Your recruiter and reporting manager will connect with you. Please check your calendar for the review meeting invite and review your personalized catchup sheet:</p>
         ${joineeSheetSection}
+        ${meetSection}
         <p>Please come prepared to discuss your progress, any challenges, and goals for the next month.</p>
         <p>Regards,<br/>${co} HR</p>
       `,
@@ -910,19 +922,24 @@ async function send30DayTechnicalReview(employee) {
 }
 
 // Template 18c: Day 25 catchup call notification — sent to HR + recruiter on day 25
-async function send25DayCatchupEmail(employee) {
+async function send25DayCatchupEmail(employee, calendarLinks = {}) {
   const { name, employeeId, doj, isFresher } = employee;
   const co = esc(process.env.COMPANY_NAME || '');
   const hrEmailAddr = resolveHrEmail(employee);
   const recruiterEmail = (employee.contacts || {}).recruiterEmail || '';
   const toEmail = [hrEmailAddr, recruiterEmail].filter(Boolean).join(', ');
   const sheetLink = (await resolveCatchupSheetUrl(employee)) || process.env.CATCHUP_TRACKING_SHEET_LINK || '#';
+  const meetLink = calendarLinks.meetLink || (employee.meetLinks && employee.meetLinks['25day-catchup']) || null;
   const contacts = employee.contacts || {};
   const managerEmail = contacts.managerEmail || '';
   const managerName  = contacts.managerName  || managerEmail;
   const location     = employee.officeLocation || '';
   const assetRequired = employee.assetRequired || '';
   const fresherLabel  = isFresher ? 'Yes (Fresher)' : 'No (Experienced)';
+
+  const meetSection = meetLink
+    ? `<p style="margin:16px 0;"><a href="${meetLink}" style="background:#0F9D58;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;display:inline-block;">Join Google Meet</a></p>`
+    : '';
 
   return sendEmail({
     to: toEmail,
@@ -943,6 +960,7 @@ async function send25DayCatchupEmail(employee) {
       </table>
       <br/>
       <p>Recruiter — please fill in the <a href="${sheetLink}">catchup tracking sheet</a> after the call.</p>
+      ${meetSection}
       <p>HR — once the call is done, reply to this email with <strong>"Confirmed"</strong> to update the checklist.</p>
       <p>Regards,<br/>${co} HR</p>
     `,
@@ -1153,7 +1171,7 @@ async function sendOnboardingCompletionReport(employee) {
 }
 
 // Simple review/catchup notification to the new joinee (day 25/30/60/90)
-async function sendJoineeReviewNotification(employee, dayMark) {
+async function sendJoineeReviewNotification(employee, dayMark, calendarLinks = {}) {
   const { name, officialEmail, personalEmail } = employee;
   const co = esc(process.env.COMPANY_NAME || 'Alethea');
   const to = officialEmail || personalEmail;
@@ -1175,6 +1193,11 @@ async function sendJoineeReviewNotification(employee, dayMark) {
       sheetSection = `<p style="margin:16px 0;"><a href="${sheetUrl}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;display:inline-block;">Open Catchup Sheet</a></p>`;
     }
   }
+  const actionKey = dayMark === 25 || dayMark === 30 ? `${dayMark}day-catchup` : `${dayMark}day-review`;
+  const meetLink = calendarLinks.meetLink || (employee.meetLinks && employee.meetLinks[actionKey]) || null;
+  const meetSection = meetLink
+    ? `<p style="margin:16px 0;"><a href="${meetLink}" style="background:#0F9D58;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;display:inline-block;">Join Google Meet</a></p>`
+    : '';
 
   return sendEmail({
     to,
@@ -1183,6 +1206,7 @@ async function sendJoineeReviewNotification(employee, dayMark) {
       <p>Hi ${esc(name)},</p>
       <p>${body}</p>
       ${sheetSection}
+      ${meetSection}
       <p>If you have any questions or concerns before the call, feel free to reach out to HR.</p>
       <p>Regards,<br/>${co} HR</p>
     `,
