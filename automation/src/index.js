@@ -526,6 +526,10 @@ async function fireInductionAndProjectIntro(auth, employee) {
   const calLockKey = `${employee.employeeId}:t27`;
   if (!isTaskDone(checklist, 't27') && !_triggerLocks.has(calLockKey)) {
     _triggerLocks.add(calLockKey);
+    // Mark "scheduled" done now (before sending) so a process restart before the
+    // screenshot is verified doesn't see t27 as pending and re-send this invite.
+    markAndLog(employee, 't27');
+    markAndLog(employee, 't28');
     saveState(employee.employeeId, snapshotEmployee(employee));
     await sendInductionCalendarInvite(employee);
     await createHRInductionEvent(auth, employee).catch(err => {
@@ -545,8 +549,12 @@ async function fireInductionAndProjectIntro(auth, employee) {
       console.warn(`[Index] Project intro sheet creation failed for ${employee.name}: ${err.message}`);
       return null;
     });
+    // Mark "scheduled" done now (before sending) so a process restart before the
+    // screenshot is verified doesn't see t29 as pending and re-send this invite.
+    markAndLog(employee, 't29');
     markAndLog(employee, 't30');
     markAndLog(employee, 't31');
+    markAndLog(employee, 't32');
     saveState(employee.employeeId, snapshotEmployee(employee));
 
     await sendProjectIntroInvite(employee, sheetUrl);
@@ -620,14 +628,33 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
     return true;
   }
 
+  // Drive push, polling, and form processing can report the same file concurrently.
+  // Claim the file before verification so only one path can send result emails.
+  if (!employee._processingFileIds) employee._processingFileIds = new Set();
+  if (employee._processingFileIds.has(file.id)) {
+    console.log(`[Index] Skipping ${file.name} — already being processed`);
+    return true;
+  }
+  employee._processingFileIds.add(file.id);
+
+  const releaseFileLock = () => employee._processingFileIds.delete(file.id);
+
   // Classify document type — subfolder is authoritative, then content, then filename
-  const docType = await detectDocType(auth, file.id, file.name, file.mimeType, subfolderHint);
+  let docType;
+  try {
+    docType = await detectDocType(auth, file.id, file.name, file.mimeType, subfolderHint);
+  } catch (err) {
+    releaseFileLock();
+    console.error(`[Index] detectDocType failed for ${file.name}:`, err.message);
+    return false;
+  }
   if (!docType) {
     console.log(`[Index] Could not classify file: ${file.name} — sending re-upload request`);
     activityLog.log(employee, 'document_rejected', `${file.name} — Could not identify document type from content or filename. Please re-upload a valid HR document.`);
     await sendDocumentRejection(employee, file.name, 'We could not identify what type of document this is. Please re-upload the correct document (Aadhaar, PAN, offer letter, marksheet, etc.).').catch(() => {});
     if (!employee.processedFileIds) employee.processedFileIds = new Set();
     employee.processedFileIds.add(file.id);
+    releaseFileLock();
     saveState(employee.employeeId, snapshotEmployee(employee));
     return true;
   }
@@ -638,6 +665,7 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
   if (!employee.processedFileIds) employee.processedFileIds = new Set();
   if (employee.processedFileIds.has(file.id)) {
     console.log(`[Index] Skipping ${file.name} — already processed in a previous run`);
+    releaseFileLock();
     return true;
   }
 
@@ -666,6 +694,7 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
   } catch (err) {
     console.error(`[Index] verifyDocument failed for ${file.name}:`, err.message);
     activityLog.log(employee, 'verification_error', `${file.name} — ${err.message}`);
+    releaseFileLock();
     return false; // signal caller to remove from seen-files so it can be retried
   }
 
@@ -751,6 +780,7 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
 
   // Record file as processed so restarts don't re-verify and re-send emails
   employee.processedFileIds.add(file.id);
+  releaseFileLock();
 
   // Save updated checklist to Drive and locally
   await uploadChecklist(auth, employee.driveFolderId, employee.checklist);
@@ -849,24 +879,22 @@ async function triggerNextStep(auth, employee, docType) {
     saveState(employee.employeeId, snapshotEmployee(employee));
   }
 
-  // HR induction screenshot uploaded → mark t27/t28/t34 done
+  // HR induction screenshot uploaded → confirms attendance (t27/t28 already marked
+  // done when the invite was sent — see fireInductionAndProjectIntro)
   if (docType === 'inductionScreenshot') {
-    markAndLog(employee, 't27');
-    markAndLog(employee, 't28');
     markAndLog(employee, 't34');
     await uploadChecklist(auth, employee.driveFolderId, checklist);
     await markHRInductionDone(auth, employee).catch(() => {});
-    console.log(`[Index] HR induction screenshot verified for ${employee.name} — t27/t28/t34 marked done`);
+    console.log(`[Index] HR induction screenshot verified for ${employee.name} — t34 marked done`);
   }
 
-  // Project intro screenshot uploaded → mark t29/t32/t37 done
+  // Project intro screenshot uploaded → confirms attendance (t29/t32 already marked
+  // done when the invite was sent — see fireInductionAndProjectIntro)
   if (docType === 'projectIntroScreenshot') {
-    markAndLog(employee, 't29');
-    markAndLog(employee, 't32');
     markAndLog(employee, 't37');
     await uploadChecklist(auth, employee.driveFolderId, checklist);
     await markProjectIntroDone(auth, employee).catch(() => {});
-    console.log(`[Index] Project intro screenshot verified for ${employee.name} — t29/t32/t37 marked done`);
+    console.log(`[Index] Project intro screenshot verified for ${employee.name} — t37 marked done`);
   }
 
   // Once BOTH screenshots are in → complete DOJ phase and fire post-DOJ tasks

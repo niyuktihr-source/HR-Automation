@@ -93,8 +93,8 @@ function createRecruiterForm() {
 
   form.addTextItem()
     .setTitle('Google Drive Root Folder ID')
-    .setHelpText('The ID of the Alethea Onboarding root folder in Drive (from the URL). Engine will create the employee subfolder inside this.')
-    .setRequired(true);
+    .setHelpText('Optional: the ID of the Alethea Onboarding root folder in Drive. If left blank, the engine uses ONBOARDING_ROOT_FOLDER_ID from its environment.')
+    .setRequired(false);
 
   // ── Log URLs ──────────────────────────────────────────────────────────────
   Logger.log('✅ Recruiter Onboarding Form created successfully!');

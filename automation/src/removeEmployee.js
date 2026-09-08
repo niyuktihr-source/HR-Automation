@@ -102,10 +102,12 @@ async function main() {
 
   // Delete status sheet from Google Drive (read fileId from state before deleting state file)
   const stateFile = path.join(STATE_DIR, `state-${id}.json`);
+  let employeeFolderId = null;
   if (fs.existsSync(stateFile)) {
     try {
       const raw = fs.readFileSync(stateFile, 'utf8');
       const state = (isEncryptionEnabled() && raw.includes('"ciphertext"')) ? JSON.parse(decrypt(raw)) : JSON.parse(raw);
+      employeeFolderId = state.driveFolderId || null;
       const sheetId = state.statusSheetId;
       if (sheetId) {
         const auth = await buildAuth();
@@ -134,7 +136,9 @@ async function main() {
   }
 
   // Offer to delete the employee's Drive folder (documents, subfolders, checklist)
-  const driveFolderId = emp.driveFolderId;
+  // employees.json may still contain the shared onboarding root folder ID.
+  // The state file contains the employee-specific folder ID after scaffolding.
+  const driveFolderId = employeeFolderId;
   if (driveFolderId) {
     const deleteFolder = await ask(`Delete employee Drive folder from Google Drive? This removes all documents permanently. (yes/no): `);
     if (deleteFolder.toLowerCase() === 'yes') {
@@ -152,6 +156,8 @@ async function main() {
     } else {
       console.log(`Drive folder kept (${driveFolderId}) — delete it manually if needed.`);
     }
+  } else if (emp.driveFolderId) {
+    console.warn('Employee state did not contain a verified employee folder ID — Drive folder deletion skipped for safety.');
   }
 
   console.log(`\nDone. Restart the engine if it is running, or call DELETE /employee/${id} first to stop active timers.`);

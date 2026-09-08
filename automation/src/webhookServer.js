@@ -94,7 +94,7 @@ function loadSeenFiles() {
   if (fs.existsSync(SEEN_FILES_PATH)) {
     try {
       const raw = JSON.parse(fs.readFileSync(SEEN_FILES_PATH, 'utf8'));
-      // Convert plain arrays back to Sets
+      // Convert plain arrays back to Sets>
       const result = {};
       for (const [empId, ids] of Object.entries(raw)) {
         result[empId] = new Set(ids);
@@ -245,9 +245,13 @@ app.post('/drive-push', async (req, res) => {
   res.sendStatus(200);
 
   // Verify channel token matches a known employee — reject spoofed pushes.
-  // Subfolder channels use tokens like "EMP001_Aadhaar" — strip the suffix to get the base ID.
+  // Match the complete ID first because valid employee IDs may contain underscores.
   const rawToken = req.headers['x-goog-channel-token'];
-  const employeeId = rawToken ? rawToken.split('_')[0] : null;
+  const employeeId = rawToken && _employeeRegistry[rawToken]
+    ? rawToken
+    : rawToken
+      ? Object.keys(_employeeRegistry).find(id => rawToken.startsWith(`${id}_`))
+      : null;
   if (!employeeId || !isValidEmployeeId(employeeId) || !_employeeRegistry[employeeId]) {
     console.warn(`[Webhook] Drive push rejected — unknown or invalid channel token: ${rawToken}`);
     return;

@@ -318,6 +318,21 @@ If this is not related to onboarding or is just a simple acknowledgement, set is
   const result = JSON.parse(jsonMatch[0]);
   if (!result.isOnboardingReply) return null;
 
+  // Keep employee matching reliable when Gemini omits an ID or truncates one
+  // containing underscores/hyphens. The official-email request subject carries
+  // the ID, so use it as a deterministic fallback.
+  if (!result.employeeId) {
+    const idMatch = `${message.subject} ${message.body || ''}`.match(/\bEMP[A-Z0-9_-]+\b/i);
+    if (idMatch) result.employeeId = idMatch[0].toUpperCase();
+  }
+  if (result.replyType === 'official_email_created' && !result.data?.officialEmail) {
+    const emailMatch = (message.body || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+    if (emailMatch) {
+      result.data = result.data || {};
+      result.data.officialEmail = emailMatch[0];
+    }
+  }
+
   console.log(`[Gmail] Reply classified as "${result.replyType}" for employee ${result.employeeId} (confidence: ${result.confidence})`);
   return result;
 }
