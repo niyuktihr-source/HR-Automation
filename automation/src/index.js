@@ -808,6 +808,25 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
 // arrive simultaneously and both pass before state is persisted to disk.
 const _triggerLocks = new Set();
 
+// Fires createEmployeeInfoSheet, guarded so the first-attempt call and the
+// missing-ID retry (both in triggerNextStep) never run concurrently for the
+// same employee — without this, a retry firing on the same event as the first
+// attempt would kick off two overlapping spreadsheet creations.
+function triggerEmployeeInfoSheetCreation(auth, employee, reason) {
+  if (employee._creatingInfoSheet) return;
+  employee._creatingInfoSheet = true;
+  createEmployeeInfoSheet(auth, employee).then(url => {
+    if (url) {
+      console.log(`[Index] Employee info sheet ${reason} succeeded for ${employee.name}: ${url}`);
+      saveState(employee.employeeId, snapshotEmployee(employee));
+    }
+  }).catch(err => {
+    console.warn(`[Index] Employee info sheet ${reason} failed for ${employee.name}: ${err.message}`);
+  }).finally(() => {
+    employee._creatingInfoSheet = false;
+  });
+}
+
 async function triggerNextStep(auth, employee, docType) {
   const { checklist, contacts } = employee;
   if (!contacts) {
@@ -866,18 +885,23 @@ async function triggerNextStep(auth, employee, docType) {
       }
 
       // Create or update AL/DI/HR/018 Employee Info Sheet with AI-extracted data pre-filled
-      createEmployeeInfoSheet(auth, employee).then(url => {
-        if (url) {
-          console.log(`[Index] Employee info sheet created/updated for ${employee.name}: ${url}`);
-          saveState(employee.employeeId, snapshotEmployee(employee));
-        }
-      }).catch(err => {
-        console.warn(`[Index] Employee info sheet creation failed for ${employee.name}: ${err.message}`);
-      });
+      triggerEmployeeInfoSheetCreation(auth, employee, 'creation');
 
       await uploadChecklist(auth, employee.driveFolderId, checklist);
       saveState(employee.employeeId, snapshotEmployee(employee));
     }
+  }
+
+  // The one-shot creation above is fired-and-forgotten and gated behind t9, which is
+  // already marked done by the time it runs — so a single transient failure (API
+  // error, quota, etc.) used to leave the AL_DI_HR_018 sheet permanently missing with
+  // no retry. Re-attempt on every subsequent event for this employee until an ID is
+  // actually recorded; createEmployeeInfoSheet's own Drive search (scoped to the
+  // employee's folder) makes this safe to repeat even if the sheet was created but the
+  // ID never got saved. triggerEmployeeInfoSheetCreation's in-flight guard keeps this
+  // from racing the call above when both fire on the same event.
+  if (isTaskDone(checklist, 't9') && !employee.employeeInfoSheetId) {
+    triggerEmployeeInfoSheetCreation(auth, employee, 'retry');
   }
 
   // Fire HR induction + project intro — triggered by offer letter OR on DOJ (whichever comes first).

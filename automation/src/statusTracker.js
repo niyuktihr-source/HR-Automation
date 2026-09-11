@@ -75,34 +75,63 @@ function nowIST() {
 // template has, and a tab can also be renamed later by a human in the Sheets UI —
 // either way every values.get/update call then fails with
 // "Unable to parse range: Status!..." (Sheets API's error for an unknown tab name).
-// Call this once per process run per employee to self-heal: if no tab is named
-// "Status", rename the first tab so the hardcoded ranges resolve again.
+//
+// A real status tracker is always a single-tab file. The AL_DI_HR_018 employee
+// info sheet is a *different* physical file that always has 3 fixed tabs
+// ('Document Version history', 'Personal Details', 'Education & Professional
+// Detail'). Earlier this function blindly renamed whichever tab came first to
+// "Status" whenever employee.statusSheetId didn't already have one — if
+// statusSheetId ever got mixed up and pointed at the AL_DI_HR_018 file instead
+// (e.g. a stale/duplicated Drive folder, or an ID search picking up the wrong
+// file), that rename silently turned the info sheet's "Document Version
+// history" tab into the milestone table, making the two "different" sheets
+// show identical Personal Details / Education content. Renaming a label can
+// never fix a wrong file being referenced in the first place — so this now
+// verifies the shape first and refuses to touch (or return as valid) anything
+// that looks like the info sheet, clearing statusSheetId instead so a genuine,
+// distinct status sheet gets resolved/created below.
 async function ensureStatusTabName(sheets, spreadsheetId, employee) {
-  if (employee._statusTabVerified) return;
-  employee._statusTabVerified = true;
+  if (employee._statusTabVerified === spreadsheetId) return true;
   try {
     const meta = await apiWithRetry(() => sheets.spreadsheets.get({
       spreadsheetId,
       fields: 'sheets.properties',
     }), 'ensureStatusTabName:get');
     const props = (meta.data.sheets || []).map(s => s.properties);
-    if (props.some(p => p.title === 'Status')) return; // already correct
-    const first = props[0];
-    if (!first) return;
+    const looksLikeInfoSheet = props.some(p => p.title === 'Personal Details')
+      && props.some(p => p.title === 'Education & Professional Detail');
+    if (looksLikeInfoSheet) {
+      console.error(`[Status] statusSheetId for ${employee.name} (${employee.employeeId}) resolves to what looks like the AL_DI_HR_018 employee info sheet (tabs: ${props.map(p => p.title).join(', ')}) — https://docs.google.com/spreadsheets/d/${spreadsheetId}. Clearing statusSheetId instead of renaming a tab on the wrong file; investigate the mix-up manually.`);
+      employee.statusSheetId = null;
+      return false;
+    }
+    if (props.some(p => p.title === 'Status')) {
+      employee._statusTabVerified = spreadsheetId;
+      return true; // already correct
+    }
+    if (props.length !== 1) {
+      console.error(`[Status] statusSheetId for ${employee.name} (${employee.employeeId}) has ${props.length} tabs (${props.map(p => p.title).join(', ')}) and none is named "Status" — https://docs.google.com/spreadsheets/d/${spreadsheetId}. This doesn't match a status tracker's shape, so clearing statusSheetId instead of guessing which tab to rename.`);
+      employee.statusSheetId = null;
+      return false;
+    }
+    // Single unnamed tab — safe to normalize (template drift or a human rename).
     await apiWithRetry(() => sheets.spreadsheets.batchUpdate({
       spreadsheetId,
       requestBody: {
         requests: [{
           updateSheetProperties: {
-            properties: { sheetId: first.sheetId, title: 'Status' },
+            properties: { sheetId: props[0].sheetId, title: 'Status' },
             fields: 'title',
           },
         }],
       },
     }), 'ensureStatusTabName:rename');
-    console.log(`[Status] Renamed tab "${first.title}" → "Status" for ${employee.name} (${employee.employeeId})`);
+    console.log(`[Status] Renamed tab "${props[0].title}" → "Status" for ${employee.name} (${employee.employeeId})`);
+    employee._statusTabVerified = spreadsheetId;
+    return true;
   } catch (err) {
     console.warn(`[Status] Could not verify/rename Status tab for ${employee.name}: ${err.message}`);
+    return true; // transient API error — leave statusSheetId alone for this run
   }
 }
 
@@ -110,9 +139,21 @@ async function ensureStatusTabName(sheets, spreadsheetId, employee) {
 async function getOrCreateStatusSheet(auth, employee) {
   const sheets = google.sheets({ version: 'v4', auth });
 
+  // statusSheetId, employeeInfoSheetId, projectIntroSheetId and catchupSheetId must
+  // always be distinct physical files. If any two are ever equal, an earlier ID
+  // resolution went wrong — clear the status one so it gets re-resolved/created
+  // below rather than silently sharing content with another tracked sheet.
+  const otherSheetIds = [employee.employeeInfoSheetId, employee.projectIntroSheetId, employee.catchupSheetId].filter(Boolean);
+  if (employee.statusSheetId && otherSheetIds.includes(employee.statusSheetId)) {
+    console.error(`[Status] statusSheetId for ${employee.name} (${employee.employeeId}) is the same file as another tracked sheet (${employee.statusSheetId}) — clearing it so a distinct status sheet gets created.`);
+    employee.statusSheetId = null;
+  }
+
   if (employee.statusSheetId) {
-    await ensureStatusTabName(sheets, employee.statusSheetId, employee);
-    return employee.statusSheetId;
+    const ok = await ensureStatusTabName(sheets, employee.statusSheetId, employee);
+    if (ok) return employee.statusSheetId;
+    // Not a real status sheet after all — ensureStatusTabName already cleared
+    // employee.statusSheetId; fall through to re-resolve/create one below.
   }
 
   const drive  = google.drive({ version: 'v3', auth });
@@ -128,10 +169,15 @@ async function getOrCreateStatusSheet(auth, employee) {
   }), 'getOrCreateStatusSheet:list');
 
   if (existing.data.files.length > 0) {
-    employee.statusSheetId = existing.data.files[0].id;
-    console.log(`[Status] Found existing status sheet for ${employee.name}`);
-    await ensureStatusTabName(sheets, employee.statusSheetId, employee);
-    return employee.statusSheetId;
+    const candidateId = existing.data.files[0].id;
+    if (otherSheetIds.includes(candidateId)) {
+      console.error(`[Status] Found a Drive file named like the status sheet for ${employee.name}, but it's the same file as another tracked sheet (${candidateId}) — refusing to adopt it as the status sheet.`);
+    } else {
+      employee.statusSheetId = candidateId;
+      console.log(`[Status] Found existing status sheet for ${employee.name}`);
+      const ok = await ensureStatusTabName(sheets, employee.statusSheetId, employee);
+      if (ok) return employee.statusSheetId;
+    }
   }
 
   // Copy from master template if configured, otherwise create blank
@@ -878,20 +924,26 @@ async function createEmployeeInfoSheet(auth, employee) {
   const ex = employee.extractedData || {};
   const pd = employee.personalDetails || {};
 
-  // If we don't have the sheet ID in memory, search Drive by employee ID (survives renames)
+  // If we don't have the sheet ID in memory, search Drive by employee ID (survives
+  // renames). Scoped to the employee's own Drive folder — an unscoped, Drive-wide
+  // search on just "(EMP0000)" + "AL_DI_HR_018" can match a stale file left over from
+  // a reused/removed employee ID and silently adopt someone else's sheet.
   if (!employee.employeeInfoSheetId) {
-    try {
-      const found = await drive.files.list({
-        q: `name contains '(${employeeId})' and name contains 'AL_DI_HR_018' and trashed=false`,
-        fields: 'files(id, name)',
-        pageSize: 5,
-      });
-      if (found.data.files && found.data.files.length > 0) {
-        employee.employeeInfoSheetId = found.data.files[0].id;
-        console.log(`[Status] Found existing employee info sheet for ${name} via Drive search: ${employee.employeeInfoSheetId}`);
+    const targetFolderId = employee.driveFolderId || employee.rootFolderId;
+    if (targetFolderId) {
+      try {
+        const found = await drive.files.list({
+          q: `name contains '(${employeeId})' and name contains 'AL_DI_HR_018' and '${targetFolderId}' in parents and trashed=false`,
+          fields: 'files(id, name)',
+          pageSize: 5,
+        });
+        if (found.data.files && found.data.files.length > 0) {
+          employee.employeeInfoSheetId = found.data.files[0].id;
+          console.log(`[Status] Found existing employee info sheet for ${name} via Drive search: ${employee.employeeInfoSheetId}`);
+        }
+      } catch (err) {
+        console.warn(`[Status] Drive search for employee info sheet failed for ${name}: ${err.message}`);
       }
-    } catch (err) {
-      console.warn(`[Status] Drive search for employee info sheet failed for ${name}: ${err.message}`);
     }
   }
 
@@ -1045,6 +1097,11 @@ async function createEmployeeInfoSheet(auth, employee) {
     }), 'createEmployeeInfoSheet:create');
 
     const spreadsheetId = spreadsheet.data.spreadsheetId;
+    // Save the ID as soon as the file exists in Drive — if a later step (value
+    // writes, formatting, the folder move, or sharing) throws, the caller's catch
+    // still leaves this spreadsheet trackable on the employee object instead of
+    // orphaning it with employeeInfoSheetId permanently null.
+    employee.employeeInfoSheetId = spreadsheetId;
     const tabIds = {};
     for (const s of spreadsheet.data.sheets) {
       tabIds[s.properties.title] = s.properties.sheetId;

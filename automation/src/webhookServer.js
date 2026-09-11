@@ -619,23 +619,15 @@ app.delete('/employee/:id', (req, res) => {
   // Cancel all cron milestone jobs
   if (_cancelAllJobs) _cancelAllJobs(id);
 
-  // Persist final state (timers cleared) before dropping from registry
+  // Persist final state (timers cleared) before dropping from registry. Use the
+  // injected saveState (same snapshotEmployee-based writer every other route in this
+  // file uses) instead of hand-writing a partial JSON — a hand-rolled subset here used
+  // to silently drop driveFolderId, employeeInfoSheetId, projectIntroSheetId,
+  // extractedData, etc. on every call, so if the employee ever got re-registered later
+  // the engine would have no record of sheets that already exist in Drive and would
+  // fall back to Drive-wide name searches to "recover" them.
   try {
-    const { encrypt, isEncryptionEnabled } = require('./encryption');
-    const fs = require('fs');
-    const path = require('path');
-    const statePath = path.join(__dirname, '..', `state-${id}.json`);
-    if (fs.existsSync(statePath)) {
-      const plaintext = JSON.stringify({
-        checklist: emp.checklist,
-        milestonesScheduled: emp.milestonesScheduled || false,
-        statusSheetId: emp.statusSheetId || null,
-        verificationResults: emp.verificationResults || {},
-        replyTimerExpiry: {},
-      }, null, 2);
-      const payload = isEncryptionEnabled() ? encrypt(plaintext) : plaintext;
-      fs.writeFileSync(statePath, payload);
-    }
+    if (_saveState) _saveState(id, emp);
   } catch (err) {
     console.warn(`[Webhook] Could not persist final state for ${id}: ${err.message}`);
   }
