@@ -70,12 +70,52 @@ function nowIST() {
   return new Date().toLocaleString('en-IN', { timeZone: config.timezone });
 }
 
+// All Status!... range reads/writes assume a tab literally named "Status".
+// A sheet copied from ONBOARDING_STATUS_TEMPLATE_ID keeps whatever tab name the
+// template has, and a tab can also be renamed later by a human in the Sheets UI —
+// either way every values.get/update call then fails with
+// "Unable to parse range: Status!..." (Sheets API's error for an unknown tab name).
+// Call this once per process run per employee to self-heal: if no tab is named
+// "Status", rename the first tab so the hardcoded ranges resolve again.
+async function ensureStatusTabName(sheets, spreadsheetId, employee) {
+  if (employee._statusTabVerified) return;
+  employee._statusTabVerified = true;
+  try {
+    const meta = await apiWithRetry(() => sheets.spreadsheets.get({
+      spreadsheetId,
+      fields: 'sheets.properties',
+    }), 'ensureStatusTabName:get');
+    const props = (meta.data.sheets || []).map(s => s.properties);
+    if (props.some(p => p.title === 'Status')) return; // already correct
+    const first = props[0];
+    if (!first) return;
+    await apiWithRetry(() => sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [{
+          updateSheetProperties: {
+            properties: { sheetId: first.sheetId, title: 'Status' },
+            fields: 'title',
+          },
+        }],
+      },
+    }), 'ensureStatusTabName:rename');
+    console.log(`[Status] Renamed tab "${first.title}" → "Status" for ${employee.name} (${employee.employeeId})`);
+  } catch (err) {
+    console.warn(`[Status] Could not verify/rename Status tab for ${employee.name}: ${err.message}`);
+  }
+}
+
 // ─── Get or create the status sheet for an employee ──────────────────────────
 async function getOrCreateStatusSheet(auth, employee) {
-  if (employee.statusSheetId) return employee.statusSheetId;
+  const sheets = google.sheets({ version: 'v4', auth });
+
+  if (employee.statusSheetId) {
+    await ensureStatusTabName(sheets, employee.statusSheetId, employee);
+    return employee.statusSheetId;
+  }
 
   const drive  = google.drive({ version: 'v3', auth });
-  const sheets = google.sheets({ version: 'v4', auth });
 
   // Status sheet goes in the employee's own subfolder (not root)
   const targetFolderId = employee.driveFolderId || employee.rootFolderId;
@@ -90,6 +130,7 @@ async function getOrCreateStatusSheet(auth, employee) {
   if (existing.data.files.length > 0) {
     employee.statusSheetId = existing.data.files[0].id;
     console.log(`[Status] Found existing status sheet for ${employee.name}`);
+    await ensureStatusTabName(sheets, employee.statusSheetId, employee);
     return employee.statusSheetId;
   }
 
@@ -108,6 +149,10 @@ async function getOrCreateStatusSheet(auth, employee) {
     }), 'getOrCreateStatusSheet:copyTemplate');
     spreadsheetId = copy.data.id;
     console.log(`[Status] Copied master template for ${employee.name}`);
+    // The template's own tab may not be named "Status" — normalize before the
+    // Status!A1 write below runs, otherwise it fails the same way.
+    employee.statusSheetId = spreadsheetId;
+    await ensureStatusTabName(sheets, spreadsheetId, employee);
   } else {
     const spreadsheet = await apiWithRetry(() => sheets.spreadsheets.create({
       requestBody: {

@@ -556,14 +556,36 @@ app.post('/preonboarding-details', async (req, res) => {
       const subfolderMap = {};
       for (const sf of (subfolderRes.data.files || [])) subfolderMap[sf.id] = sf.name;
 
+      let newFilesFound = 0;
       for (const f of allFiles) {
         if (processed.has(f.id)) continue;
+        newFilesFound++;
         // Determine subfolder from parent
         const parentId = f.parents && f.parents[0];
         const subfolderName = subfolderMap[parentId] || null;
         await _handleNewFile(_auth, emp, { id: f.id, name: f.name, mimeType: f.mimeType }, subfolderName).catch(err =>
           console.error(`[Webhook] Fallback handleNewFile error for ${f.name}: ${err.message}`)
         );
+      }
+
+      // Neither uploadedFiles from GAS nor anything new in the Drive folder —
+      // the documents are very likely still sitting in the form's own response
+      // storage, never having reached the engine at all. Surface this immediately
+      // rather than letting it sit silent until someone notices missing documents
+      // (the startup reconciliation pass will also recover it automatically on the
+      // next restart, but that could be hours or days away).
+      if (newFilesFound === 0) {
+        console.warn(`[Webhook] Form document hand-off appears to have failed for ${emp.name} (${employeeId}) — no uploadedFiles from GAS and no new files in Drive folder either.`);
+        const { sendEmail } = require('./emailSender');
+        const hrEmail = (emp.contacts && emp.contacts.hrEmail) || process.env.HR_EMAIL;
+        sendEmail({
+          to: hrEmail,
+          subject: `ALERT — Pre-Onboarding Document Hand-off May Have Failed for ${emp.name} (${employeeId})`,
+          html: `<p>Hi,</p>
+            <p><strong>${emp.name}</strong> (${employeeId}) submitted the pre-onboarding form and their personal details were saved, but the engine received no uploaded file references, and a fallback scan of their Drive folder found nothing new either.</p>
+            <p>This usually means their documents are still sitting in the Google Form's own file-response storage and never reached their employee Drive folder. The engine will attempt to recover this automatically on its next restart — but please also check their form response row directly to confirm nothing is missing.</p>
+            <p>Regards,<br/>${process.env.COMPANY_NAME} HR Automation</p>`,
+        }).catch(err => console.warn(`[Webhook] Could not send form hand-off alert for ${emp.name}: ${err.message}`));
       }
     } catch (err) {
       console.error(`[Webhook] Fallback Drive scan failed for ${emp.name}: ${err.message}`);

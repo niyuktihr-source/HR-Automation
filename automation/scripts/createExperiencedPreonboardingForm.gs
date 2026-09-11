@@ -189,6 +189,39 @@ var FOLDER_MAP = {
 var ALETHEA_ONBOARDING_ROOT_ID = '1iRrIbE2POIxQVSjbVDlHt1QjVM6LLnob';
 
 var ENGINE_WEBHOOK_URL = PropertiesService.getScriptProperties().getProperty('ENGINE_WEBHOOK_URL') || '';
+var HR_ALERT_EMAIL = PropertiesService.getScriptProperties().getProperty('HR_ALERT_EMAIL') || 'hr@aletheatech.com';
+
+// POSTs to the engine with a few retries (exponential backoff) before giving up.
+// A single failed attempt previously meant the joinee's documents stayed stuck in
+// this form's own file-response storage forever, with nothing anywhere noticing —
+// most commonly because the engine happened to be mid-restart at that exact moment.
+function postToEngineWithRetry(url, payload, maxAttempts) {
+  maxAttempts = maxAttempts || 3;
+  var lastError = null;
+  for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      var resp = UrlFetchApp.fetch(url, {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify(payload),
+        muteHttpExceptions: true,
+      });
+      var code = resp.getResponseCode();
+      if (code >= 200 && code < 300) {
+        return { ok: true, code: code, attempt: attempt };
+      }
+      lastError = 'HTTP ' + code + ': ' + resp.getContentText();
+    } catch (err) {
+      lastError = err.message;
+    }
+    if (attempt < maxAttempts) {
+      var delayMs = Math.pow(2, attempt) * 2000; // 4s, 8s, 16s...
+      Logger.log('⚠️ Attempt ' + attempt + ' failed (' + lastError + ') — retrying in ' + (delayMs / 1000) + 's');
+      Utilities.sleep(delayMs);
+    }
+  }
+  return { ok: false, error: lastError, attempt: maxAttempts };
+}
 
 function onExperiencedFormSubmit(e) {
   var responses = e.response.getItemResponses();
@@ -221,21 +254,37 @@ function onExperiencedFormSubmit(e) {
     return;
   }
 
+  var payload = {
+    employeeId: employeeId,
+    respondentEmail: e.response.getRespondentEmail(),
+    personalDetails: personalDetails,
+    uploadedFiles: uploadedFiles,
+  };
+  var result = postToEngineWithRetry(ENGINE_WEBHOOK_URL + '/preonboarding-details', payload, 3);
+
+  if (result.ok) {
+    Logger.log('✅ Sent to engine on attempt ' + result.attempt + ' — status: ' + result.code + ' files: ' + uploadedFiles.length);
+    return;
+  }
+
+  // All retries failed — the engine may be down or mid-restart. Don't let this
+  // fail silently: email HR directly (this doesn't depend on the engine at all).
+  Logger.log('⚠️ Could not reach engine after ' + result.attempt + ' attempts: ' + result.error);
   try {
-    var payload = {
-      employeeId: employeeId,
-      respondentEmail: e.response.getRespondentEmail(),
-      personalDetails: personalDetails,
-      uploadedFiles: uploadedFiles,
-    };
-    var resp = UrlFetchApp.fetch(ENGINE_WEBHOOK_URL + '/preonboarding-details', {
-      method: 'post',
-      contentType: 'application/json',
-      payload: JSON.stringify(payload),
-      muteHttpExceptions: true,
+    MailApp.sendEmail({
+      to: HR_ALERT_EMAIL,
+      subject: 'ALERT — Pre-Onboarding Form Could Not Reach Engine (' + employeeId + ')',
+      body: 'The pre-onboarding form (Experienced) was submitted for employee ' + employeeId +
+        ' (' + (e.response.getRespondentEmail() || 'unknown email') + '), but the automation engine ' +
+        'could not be reached after ' + result.attempt + ' attempts.\n\n' +
+        'Error: ' + result.error + '\n\n' +
+        uploadedFiles.length + ' document(s) were uploaded in this submission and are currently ' +
+        'sitting in this Form\'s own file-response storage — they have NOT been moved into the ' +
+        'employee\'s Drive folder yet.\n\n' +
+        'The engine will attempt to recover this automatically the next time it restarts. If this ' +
+        'keeps happening, check whether the engine is online.',
     });
-    Logger.log('✅ Sent to engine — status: ' + resp.getResponseCode() + ' files: ' + uploadedFiles.length);
-  } catch (err) {
-    Logger.log('⚠️ Could not send to engine: ' + err.message);
+  } catch (mailErr) {
+    Logger.log('⚠️ Could not send HR alert email either: ' + mailErr.message);
   }
 }

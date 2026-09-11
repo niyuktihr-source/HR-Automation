@@ -35,6 +35,23 @@ module.exports = {
   // ─── Drive folder structure ─────────────────────────────────────────────────
   driveSubfolders: ['Aadhaar', 'PAN', 'Current_Address_Proof', 'Permanent_Address_Proof', 'Offer_Letter', 'Passport_Photo', 'Passport', 'UAN', 'Payslip', 'Relieving_Letter', 'Marksheet_10th', 'Marksheet_12th', 'Degree_Certificate', 'Postgrad_Certificate', 'BGV', 'HR_Induction_Screenshot', 'Project_Intro_Screenshot', 'Reports'],
 
+  // ─── Pre-onboarding form file-upload question → Drive subfolder ────────────
+  // Must stay in sync with FOLDER_MAP in scripts/createFresherPreonboardingForm.gs
+  // and scripts/createExperiencedPreonboardingForm.gs.
+  formFileUploadMap: {
+    'Upload Aadhaar Card':         'Aadhaar',
+    'Upload PAN Card':              'PAN',
+    'Current Address Proof':        'Current_Address_Proof',
+    'Permanent Address Proof':      'Permanent_Address_Proof',
+    'Upload Passport Size Photo':   'Passport_Photo',
+    'Upload Offer Letter':          'Offer_Letter',
+    'Upload 10th Marksheet':        'Marksheet_10th',
+    'Upload 12th Marksheet':        'Marksheet_12th',
+    'Upload Degree Certificate':    'Degree_Certificate',
+    'Upload Relieving Letter':      'Relieving_Letter',
+    "Upload Last Month's Payslip":  'Payslip',
+  },
+
   // ─── Drive push channel TTL ─────────────────────────────────────────────────
   drivePushChannelTtlDays: 6,
   drivePushRenewBeforeExpirySecs: 3600, // renew 1 hour before expiry

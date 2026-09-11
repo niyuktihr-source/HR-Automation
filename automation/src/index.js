@@ -166,6 +166,10 @@ function snapshotEmployee(employee) {
     phoneNumber: employee.phoneNumber || '',
     doj: employee.doj || '',
     driveFolderId: employee.driveFolderId || '',
+    // The shared onboarding root folder ID this employee's folder was scaffolded under.
+    // Compared against employees.json on each restart to detect drift that would make
+    // the folder-scaffold lookup miss the employee's real folder — see main().
+    rootFolderId: employee.rootFolderId || '',
     isFresher: employee.isFresher || false,
     role: employee.role || '',
     department: employee.department || '',
@@ -192,6 +196,12 @@ function snapshotEmployee(employee) {
     scheduledActions: employee._scheduledActions || {},
     createdActions: employee._createdActions || {},
     calendarActions: employee._calendarActions || {},
+    // Set once the startup reconciliation pass has fully checked this employee's
+    // form submission against their Drive folder — see reconcileFormDocuments().
+    // Once true, that check never runs again for this employee, even if a document
+    // is later removed from their folder for a legitimate reason (rejected upload,
+    // manual correction) — this prevents the pass from silently re-adding it.
+    formDocsReconciled: employee.formDocsReconciled || false,
   };
 }
 
@@ -1891,8 +1901,20 @@ async function onboardEmployee(auth, employee) {
   // folder and returns a folderMap with the employee's own folder ID at folderMap.root.
   // We update employee.driveFolderId to point to the employee's own folder so all
   // subsequent file uploads (checklist, instructions) land inside it, not in the root.
+  //
+  // employee.driveFolderId here is still the shared root from employees.json (it's never
+  // restored from state — see below). If this employee was already scaffolded in a prior
+  // run, the state file holds the real per-employee folder ID under the same key; pass it
+  // in as a known-good ID so scaffoldEmployeeFolder can verify and reuse it directly instead
+  // of re-deriving the folder by exact-matching "<name>_<employeeId>" against Drive — a
+  // lookup that silently creates a duplicate, empty folder if `employee.name` has since
+  // been edited (spelling fix, spacing, etc.) in employees.json.
   try {
-    const folderMap = await scaffoldEmployeeFolder(auth, employee.driveFolderId, employee.name, employee.employeeId, employee.isFresher);
+    const savedForFolder = loadState(employee.employeeId);
+    const knownFolderId = (savedForFolder && savedForFolder.driveFolderId && savedForFolder.driveFolderId !== employee.driveFolderId)
+      ? savedForFolder.driveFolderId
+      : null;
+    const folderMap = await scaffoldEmployeeFolder(auth, employee.driveFolderId, employee.name, employee.employeeId, employee.isFresher, knownFolderId);
     employee.rootFolderId = employee.driveFolderId; // keep root (Alethea Onboarding/) for status sheet
     employee.driveFolderId = folderMap.root; // now points to Test User_EMP002/, not Alethea Onboarding/
   } catch (err) {
@@ -2209,6 +2231,19 @@ async function onboardEmployee(auth, employee) {
   }
 }
 
+// ─── Form-document reconciliation ──────────────────────────────────────────────
+// The pre-onboarding form's Apps Script trigger POSTs uploaded file IDs to the
+// engine in a single, non-retried request (see webhookServer.js /preonboarding-details).
+// If that request fails to reach the engine (e.g. it was mid-restart), the joinee's
+// documents stay stuck in the form's own file-response storage and never reach their
+// Drive folder — silently, with nothing in the engine's own logs to show it happened.
+// This cross-checks each employee's form submission against their Drive folder once,
+// and recovers anything that's missing.
+//
+// The actual logic lives in formDocReconciler.js — pure/injectable, unit tested
+// independently since this file boots the whole engine on require.
+const { reconcileFormDocuments } = require('./formDocReconciler');
+
 // ─── Startup self-healing reconciliation ──────────────────────────────────────
 // Runs once on engine startup (8s after Gmail watch settles).
 // Detects employees stuck in broken states and searches Gmail for resolution
@@ -2224,6 +2259,7 @@ async function reconcileStuckEmployees(auth) {
 
   console.log(`\n[Reconcile] ▶ Startup self-healing pass — checking ${employees.length} employee(s) for stuck states...`);
   let fixedCount = 0;
+  const formRowCache = {}; // fetch each response sheet once per pass, not once per employee
 
   for (const employee of employees) {
     const cl = employee.checklist;
@@ -2323,6 +2359,13 @@ async function reconcileStuckEmployees(auth) {
       } catch (err) {
         console.warn(`[Reconcile] Gmail search failed for ${employee.name} IT: ${err.message}`);
       }
+    }
+
+    // ── Case 3: form documents never reached the employee's Drive folder ────
+    // See reconcileFormDocuments() above for why this happens and why it's safe
+    // to run unconditionally here — it no-ops instantly once already checked.
+    if (await reconcileFormDocuments(auth, employee, formRowCache, { handleNewFile, saveState, snapshotEmployee, activityLog })) {
+      fixedCount++;
     }
   }
 
@@ -2525,8 +2568,22 @@ async function main() {
         continue;
       }
 
+      // ── Guard: detect employees.json root Drive folder drift ────────────────
+      // At this point employee.driveFolderId is still the raw value from
+      // employees.json (the shared onboarding root) — scaffolding hasn't run yet.
+      // If it no longer matches the root this employee was last scaffolded under,
+      // the upcoming name-based folder lookup could miss their real folder. The
+      // scaffold fix itself (verify-known-folder-by-ID) already prevents that from
+      // creating a duplicate, but a drift here is still worth knowing about —
+      // it likely means employees.json was edited outside the normal flow.
+      if (saved && saved.rootFolderId && employee.driveFolderId && saved.rootFolderId !== employee.driveFolderId) {
+        console.warn(`[Index] ⚠️ Root Drive folder ID drift detected for ${employee.name} (${employee.employeeId}) — was "${saved.rootFolderId}", employees.json now has "${employee.driveFolderId}". Verify this change was intentional.`);
+        activityLog.log(employee, 'root_folder_drift_detected', `was ${saved.rootFolderId}, now ${employee.driveFolderId}`);
+      }
+
       if (!employee.checklist) employee.checklist = saved ? saved.checklist : buildDefaultChecklist();
       migrateChecklist(employee.checklist);
+      if (saved && saved.formDocsReconciled) employee.formDocsReconciled = true;
       if (!employee.statusSheetId && saved && saved.statusSheetId) employee.statusSheetId = saved.statusSheetId;
       if (!employee.projectIntroSheetId && saved && saved.projectIntroSheetId) employee.projectIntroSheetId = saved.projectIntroSheetId;
       if (!employee.employeeInfoSheetId && saved && saved.employeeInfoSheetId) employee.employeeInfoSheetId = saved.employeeInfoSheetId;

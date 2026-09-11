@@ -263,10 +263,36 @@ async function uploadChecklist() {
   return null;
 }
 
-// Build the expected sub-folder structure inside an employee's Drive folder
-async function scaffoldEmployeeFolder(auth, rootFolderId, employeeName, employeeId, isFresher) {
+// Build the expected sub-folder structure inside an employee's Drive folder.
+// knownFolderId (optional): the employee's folder ID from a previous run, if any.
+// When given, it's verified against Drive and reused directly — this is what makes
+// the scaffold idempotent across restarts even if employeeName is edited later
+// (e.g. a spelling fix), instead of falling through to the exact-name search below
+// and silently creating a second, empty folder under the new name.
+async function scaffoldEmployeeFolder(auth, rootFolderId, employeeName, employeeId, isFresher, knownFolderId) {
+  const drive = google.drive({ version: 'v3', auth });
+  let employeeFolderId = null;
+
+  if (knownFolderId) {
+    try {
+      const meta = await apiWithRetry(() => drive.files.get({
+        fileId: knownFolderId,
+        fields: 'id, trashed',
+      }), `scaffoldEmployeeFolder:verifyKnownFolder:${knownFolderId}`);
+      if (meta.data && !meta.data.trashed) {
+        employeeFolderId = knownFolderId;
+      } else {
+        console.warn(`[Drive] Known folder ${knownFolderId} for ${employeeName} (${employeeId}) is trashed — falling back to name-based lookup`);
+      }
+    } catch (err) {
+      console.warn(`[Drive] Known folder ${knownFolderId} for ${employeeName} (${employeeId}) is no longer accessible — falling back to name-based lookup: ${err.message}`);
+    }
+  }
+
   const folderName = `${employeeName}_${employeeId}`;
-  const employeeFolderId = await createSubFolder(auth, rootFolderId, folderName);
+  if (!employeeFolderId) {
+    employeeFolderId = await createSubFolder(auth, rootFolderId, folderName);
+  }
 
   // Freshers have no prior employment — skip work-history document folders
   const fresherExclude = isFresher ? ['Relieving_Letter', 'Payslip'] : [];
