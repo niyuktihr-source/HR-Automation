@@ -1,8 +1,10 @@
 // Pretty-print an employee's persisted state file.
 // Usage: npm run view-state -- EMP001
 
+require('dotenv').config();
 const fs   = require('fs');
 const path = require('path');
+const { decrypt } = require('./encryption');
 
 const employeeId = process.argv[2];
 if (!employeeId) {
@@ -18,7 +20,11 @@ if (!fs.existsSync(stateFile)) {
 }
 
 try {
-  const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  const raw = fs.readFileSync(stateFile, 'utf8');
+  const parsed = JSON.parse(raw);
+  // Encrypted state files are {iv, ciphertext, tag} — decrypt before reading fields,
+  // otherwise every field below silently reads as undefined off the wrong object.
+  const state = parsed.ciphertext ? JSON.parse(decrypt(raw)) : parsed;
 
   // Summary header
   let total = 0, done = 0;
@@ -33,7 +39,11 @@ try {
   console.log(`\n=== State: ${employeeId} ===`);
   console.log(`Progress  : ${done}/${total} tasks (${pct}%)`);
   console.log(`Milestones: ${state.milestonesScheduled ? 'scheduled' : 'not yet scheduled'}`);
-  console.log(`Sheet ID  : ${state.statusSheetId || '(none)'}`);
+  console.log(`Status Sheet ID      : ${state.statusSheetId || '(none)'}`);
+  console.log(`Employee Info Sheet ID: ${state.employeeInfoSheetId || '(none)'}`);
+  if (state.statusSheetId && state.statusSheetId === state.employeeInfoSheetId) {
+    console.log(`  ⚠ statusSheetId and employeeInfoSheetId are THE SAME FILE — this is the bug.`);
+  }
 
   if (state.verificationResults && Object.keys(state.verificationResults).length > 0) {
     console.log('\nVerification Results:');
