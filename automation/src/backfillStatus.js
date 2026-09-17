@@ -1,20 +1,17 @@
 /**
  * backfillStatus.js — One-off manual repair tool: after clearing a broken
- * statusSheetId and letting the engine create a genuinely fresh status sheet
- * (which always starts every employee at milestone 0 = In Progress, everything
- * else Pending — it has no knowledge of real historical progress), this
- * replays the employee's actual progress onto that fresh sheet using the
- * exact same named milestone updater functions the live engine calls, so the
- * result matches what the engine would have written if the sheet had never
- * broken in the first place.
+ * statusSheetId (so it's null in state), this replays the employee's actual
+ * progress using the exact same named milestone updater functions the live
+ * engine calls. Each of those calls updateMilestone() -> getOrCreateStatusSheet()
+ * internally, so this script creates the fresh sheet itself on first use — a
+ * prior engine restart is NOT required, and in practice won't help: the engine
+ * only calls getOrCreateStatusSheet() reactively, when some event (a new
+ * document, an email reply, a cron firing) triggers a milestone update. A bare
+ * restart for an employee with no incoming events does nothing.
  *
- * IMPORTANT — run this only:
- *   1. AFTER `pm2 restart hr-engine` has already created the new status sheet
- *      (confirm state-<EMPID>.json's statusSheetId is populated, e.g. via
- *      `node src/inspectSheet.js <statusSheetId>`).
- *   2. With the engine not concurrently writing this employee's state, to
- *      avoid a lost update — either stop pm2 first, or run it when you know
- *      no other event for this employee is in flight.
+ * IMPORTANT — run this with the engine not concurrently writing this
+ * employee's state, to avoid a lost update: either stop pm2 first, or run it
+ * when you know no other event for this employee is in flight.
  *
  * Usage:
  *   node src/backfillStatus.js <EMPID>
@@ -81,13 +78,13 @@ async function run() {
 
   const auth = buildAuth();
   const { data: employee, file, wasEncrypted } = loadState(employeeId);
+  employee._auth = auth; // some statusTracker helpers (e.g. markDocumentsReceived) read this
 
-  if (!employee.statusSheetId) {
-    console.error(`state-${employeeId}.json has no statusSheetId yet — restart the engine first so it creates the fresh sheet, then re-run this.`);
-    process.exit(1);
+  if (employee.statusSheetId) {
+    console.log(`Backfilling existing status sheet for ${employee.name} (${employeeId}) → https://docs.google.com/spreadsheets/d/${employee.statusSheetId}`);
+  } else {
+    console.log(`No statusSheetId yet for ${employee.name} (${employeeId}) — the first milestone call below will create a fresh sheet.`);
   }
-
-  console.log(`Backfilling status sheet for ${employee.name} (${employeeId}) → https://docs.google.com/spreadsheets/d/${employee.statusSheetId}`);
 
   for (const fnName of MILESTONES_TO_APPLY) {
     const fn = statusTracker[fnName];
@@ -97,7 +94,7 @@ async function run() {
   }
 
   saveState(file, employee, wasEncrypted);
-  console.log('Done. State file re-saved (statusSheetId unchanged unless the sheet needed re-resolving).');
+  console.log(`Done. statusSheetId is now ${employee.statusSheetId} → https://docs.google.com/spreadsheets/d/${employee.statusSheetId}`);
 }
 
 run().catch(err => { console.error('Fatal:', err.message); process.exit(1); });
