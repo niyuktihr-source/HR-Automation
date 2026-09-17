@@ -632,9 +632,20 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
     return true;
   }
 
-  // Skip Google Sheets/Docs — these are engine-created files, not employee documents
+  // Skip spreadsheet/document work products — they are not employee verification documents.
+  // Check both MIME type and filename because restored Drive files can have a generic MIME type.
+  const isExcelWorkbook = [
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.ms-excel.sheet.macroenabled.12',
+    'application/vnd.ms-excel.template.macroenabled.12',
+  ].includes(file.mimeType) || /\.(xlsx|xls|xlsm|xltx|xltm)$/i.test(file.name || '');
+
+  // Native Google Sheets/Docs and Excel workbooks are engine work products, not employee documents.
   if (file.mimeType === 'application/vnd.google-apps.spreadsheet' ||
-      file.mimeType === 'application/vnd.google-apps.document') {
+      file.mimeType === 'application/vnd.google-apps.document' ||
+      isExcelWorkbook) {
+    console.log(`[Index] Skipping non-verification workbook/document: ${file.name}`);
     return true;
   }
 
@@ -783,6 +794,16 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
     if (employee.noResponseTimers[docType]) employee.noResponseTimers[docType].stop();
     const alertRecipient = (employee.contacts && employee.contacts.recruiterEmail) || process.env.HR_EMAIL;
     employee.noResponseTimers[docType] = scheduleDocumentReminders(employee, result.docType || docType, reason, alertRecipient);
+
+    // This document failed, so triggerNextStep below won't run for it — but other core
+    // docs may already all have a resolved (pass or fail) result. Re-check here too,
+    // otherwise a required document whose *final* verification fails permanently stalls
+    // t9 / the AL_DI_HR_018 info sheet, waiting for a re-upload that may never come.
+    if (employee.contacts) {
+      await checkCoreDocsAndCreateInfoSheet(auth, employee).catch(err =>
+        console.warn(`[Index] Core-docs check failed for ${employee.name}: ${err.message}`)
+      );
+    }
   }
 
   // Verification report is sent once — as a consolidated email when all docs are done.
@@ -827,33 +848,20 @@ function triggerEmployeeInfoSheetCreation(auth, employee, reason) {
   });
 }
 
-async function triggerNextStep(auth, employee, docType) {
-  const { checklist, contacts } = employee;
-  if (!contacts) {
-    console.error(`[Index] triggerNextStep: missing contacts for ${employee.name} — cannot proceed`);
-    return;
-  }
-
-  // After all identity docs verified → request official email creation (t14)
-  // Both aadhaar AND pan must pass before firing — check verificationResults, not just t12,
-  // because t12 is shared and gets marked on whichever arrives first.
-  if (docType === 'aadhaar' || docType === 'pan') {
-    const vr = employee.verificationResults || {};
-    const bothVerified = vr.aadhaar && vr.aadhaar.valid && vr.pan && vr.pan.valid;
-    const lockKey = `${employee.employeeId}:docsVerified`;
-    if (bothVerified && !_triggerLocks.has(lockKey)) {
-      _triggerLocks.add(lockKey);
-      // Both identity docs verified — update Drive/status sheet.
-      // t14 (official email request) is intentionally NOT marked here.
-      // fireDOJEmails() marks t14 and sends the email on DOJ morning.
-      await markDocumentsVerifiedOk(auth, employee).catch(() => {});
-      await uploadChecklist(auth, employee.driveFolderId, checklist);
-      saveState(employee.employeeId, snapshotEmployee(employee));
-    }
-  }
-
-  // Send ONE consolidated doc verification report when all expected docs are verified.
-  // BGV is always handled separately — HR forwards the SmartScreen PDF to the engine.
+// Send ONE consolidated doc verification report once every expected core document has
+// a recorded result (pass OR fail — "resolved"), and create the AL/DI/HR/018 employee
+// info sheet at the same time. BGV is always handled separately — HR forwards the
+// SmartScreen PDF to the engine.
+//
+// This must be checked after EVERY document event, not just ones that passed: it's
+// called both from triggerNextStep (reached only when a document passes) and directly
+// from processDocument's failure branch. Without the latter, an employee whose last
+// required document FAILS verification (e.g. a rejected degree certificate) would
+// never re-trigger this check — verificationResults would already contain an entry for
+// every core doc, but nothing would ever look at it again unless a further document
+// happened to be uploaded, leaving t9 unmarked and the info sheet permanently missing.
+async function checkCoreDocsAndCreateInfoSheet(auth, employee) {
+  const checklist = employee.checklist;
   const ALL_DOCS = employee.isFresher
     ? ['aadhaar', 'pan', 'marksheet10th', 'marksheet12th', 'degreeCertificate']
     : ['aadhaar', 'pan', 'marksheet10th', 'marksheet12th', 'degreeCertificate', 'relievingLetter'];
@@ -903,6 +911,34 @@ async function triggerNextStep(auth, employee, docType) {
   if (isTaskDone(checklist, 't9') && !employee.employeeInfoSheetId) {
     triggerEmployeeInfoSheetCreation(auth, employee, 'retry');
   }
+}
+
+async function triggerNextStep(auth, employee, docType) {
+  const { checklist, contacts } = employee;
+  if (!contacts) {
+    console.error(`[Index] triggerNextStep: missing contacts for ${employee.name} — cannot proceed`);
+    return;
+  }
+
+  // After all identity docs verified → request official email creation (t14)
+  // Both aadhaar AND pan must pass before firing — check verificationResults, not just t12,
+  // because t12 is shared and gets marked on whichever arrives first.
+  if (docType === 'aadhaar' || docType === 'pan') {
+    const vr = employee.verificationResults || {};
+    const bothVerified = vr.aadhaar && vr.aadhaar.valid && vr.pan && vr.pan.valid;
+    const lockKey = `${employee.employeeId}:docsVerified`;
+    if (bothVerified && !_triggerLocks.has(lockKey)) {
+      _triggerLocks.add(lockKey);
+      // Both identity docs verified — update Drive/status sheet.
+      // t14 (official email request) is intentionally NOT marked here.
+      // fireDOJEmails() marks t14 and sends the email on DOJ morning.
+      await markDocumentsVerifiedOk(auth, employee).catch(() => {});
+      await uploadChecklist(auth, employee.driveFolderId, checklist);
+      saveState(employee.employeeId, snapshotEmployee(employee));
+    }
+  }
+
+  await checkCoreDocsAndCreateInfoSheet(auth, employee);
 
   // Fire HR induction + project intro — triggered by offer letter OR on DOJ (whichever comes first).
   // Lock keys ensure each block fires only once regardless of which path triggers it.
