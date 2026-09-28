@@ -39,7 +39,11 @@ module.exports = {
   },
 
   // ─── Drive folder structure ─────────────────────────────────────────────────
-  driveSubfolders: ['Aadhaar', 'PAN', 'Current_Address_Proof', 'Permanent_Address_Proof', 'Offer_Letter', 'Passport_Photo', 'Passport', 'UAN', 'Payslip', 'Relieving_Letter', 'Marksheet_10th', 'Marksheet_12th', 'Degree_Certificate', 'Postgrad_Certificate', 'BGV', 'HR_Induction_Screenshot', 'Project_Intro_Screenshot', 'Catchup25_Screenshot', 'Reports'],
+  driveSubfolders: ['Aadhaar', 'PAN', 'Current_Address_Proof', 'Permanent_Address_Proof', 'Offer_Letter', 'Passport_Photo', 'Passport', 'UAN', 'Payslip', 'Relieving_Letter', 'Marksheet_10th', 'Marksheet_12th', 'Degree_Certificate', 'Postgrad_Certificate', 'BGV', 'HR_Induction_Screenshot', 'Project_Intro_Screenshot', 'Catchup Call', 'Reports'],
+  // 25-day catchup screenshot (saved by the engine from the recruiter's reply) — not a joinee document
+  catchupScreenshotSubfolder: 'Catchup Call',
+  // Old subfolder name → current one; existing folders are renamed on startup instead of duplicated
+  renamedSubfolders: { 'Catchup25_Screenshot': 'Catchup Call' },
 
   // ─── Pre-onboarding form file-upload question → Drive subfolder ────────────
   // Must stay in sync with FOLDER_MAP in scripts/createFresherPreonboardingForm.gs

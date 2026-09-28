@@ -1727,13 +1727,13 @@ async function handleReply(auth, classified, rawMsg) {
         }
         if (buffer && employee.driveFolderId) {
           const subfolderRes = await drive.files.list({
-            q: `name='Catchup25_Screenshot' and '${employee.driveFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+            q: `name='${config.catchupScreenshotSubfolder}' and '${employee.driveFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
             fields: 'files(id)',
           });
           let targetFolderId = subfolderRes.data.files && subfolderRes.data.files[0] && subfolderRes.data.files[0].id;
           if (!targetFolderId) {
             const created = await drive.files.create({
-              requestBody: { name: 'Catchup25_Screenshot', mimeType: 'application/vnd.google-apps.folder', parents: [employee.driveFolderId] },
+              requestBody: { name: config.catchupScreenshotSubfolder, mimeType: 'application/vnd.google-apps.folder', parents: [employee.driveFolderId] },
               fields: 'id',
             });
             targetFolderId = created.data.id;
@@ -1744,7 +1744,7 @@ async function handleReply(auth, classified, rawMsg) {
             media: { mimeType: screenshot.mimeType, body: Readable.from(buffer) },
             fields: 'id',
           });
-          console.log(`[Index] Saved 25-day catchup screenshot for ${employee.name} → Catchup25_Screenshot/${screenshot.filename}`);
+          console.log(`[Index] Saved 25-day catchup screenshot for ${employee.name} → ${config.catchupScreenshotSubfolder}/${screenshot.filename}`);
         }
       } catch (err) {
         console.warn(`[Index] Could not save 25-day catchup screenshot for ${employee.name}: ${err.message}`);
@@ -2451,7 +2451,9 @@ async function onboardEmployee(auth, employee) {
 
   // Poll each document subfolder — push channels are only registered for the root folder
   // to avoid hitting Drive's per-user push channel quota.
-  const docSubfolders = config.driveSubfolders.filter(sf => !['BGV', 'Reports'].includes(sf));
+  // The catchup screenshot folder is filled by the engine itself — polling it would treat the
+  // screenshot as a joinee document (and email the joinee a rejection when it can't be identified).
+  const docSubfolders = config.driveSubfolders.filter(sf => !['BGV', 'Reports', config.catchupScreenshotSubfolder].includes(sf));
   const drive = require('googleapis').google.drive({ version: 'v3', auth });
   for (const subfolderName of docSubfolders) {
     try {

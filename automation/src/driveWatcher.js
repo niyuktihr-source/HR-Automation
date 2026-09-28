@@ -298,12 +298,38 @@ async function scaffoldEmployeeFolder(auth, rootFolderId, employeeName, employee
   const fresherExclude = isFresher ? ['Relieving_Letter', 'Payslip'] : [];
   const subFolders = config.driveSubfolders.filter(sf => !fresherExclude.includes(sf));
 
+  await renameLegacySubfolders(auth, employeeFolderId, employeeName);
+
   const folderMap = { root: employeeFolderId };
   for (const sf of subFolders) {
     folderMap[sf] = await createSubFolder(auth, employeeFolderId, sf);
   }
   console.log(`[Drive] Folder structure ready for ${employeeName} (${employeeId})`);
   return folderMap;
+}
+
+// Renames subfolders created under an old name (config.renamedSubfolders) so the scaffold
+// below reuses them instead of creating a second, empty folder next to them. Skipped if a
+// folder with the new name already exists. Never throws — a failure just means the scaffold
+// creates the new-name folder as before.
+async function renameLegacySubfolders(auth, employeeFolderId, employeeName) {
+  const drive = google.drive({ version: 'v3', auth });
+  for (const [oldName, newName] of Object.entries(config.renamedSubfolders || {})) {
+    try {
+      const find = name => apiWithRetry(() => drive.files.list({
+        q: `name='${name.replace(/'/g, "\\'")}' and '${employeeFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+        fields: 'files(id)',
+      }), `renameLegacySubfolders:list:${name}`);
+      const legacy = (await find(oldName)).data.files || [];
+      if (legacy.length === 0) continue;
+      const current = (await find(newName)).data.files || [];
+      if (current.length > 0) continue;
+      await apiWithRetry(() => drive.files.update({ fileId: legacy[0].id, requestBody: { name: newName }, fields: 'id' }), `renameLegacySubfolders:rename:${oldName}`);
+      console.log(`[Drive] Renamed sub-folder "${oldName}" → "${newName}" for ${employeeName}`);
+    } catch (err) {
+      console.warn(`[Drive] Could not rename sub-folder "${oldName}" → "${newName}" for ${employeeName}: ${err.message}`);
+    }
+  }
 }
 
 // Grant a single user writer access to the employee Drive folder.
