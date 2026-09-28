@@ -8,7 +8,8 @@ module.exports = {
 
   // ─── Milestone day offsets (days after DOJ) ────────────────────────────────
   milestones: {
-    surveyday:      25,   // onboarding survey sent to employee
+    onboardingSurveyDay: 23, // "Employee Feedback Form: Onboarding Experience" sent to new joinee
+    surveyday:      25,   // 25-day catchup call
     catchup30day:   30,   // 30-day catchup call reminder
     review60day:    60,   // 60-day review reminder
     review90day:    90,   // 90-day review reminder
@@ -22,18 +23,23 @@ module.exports = {
     reviewNoReplyHours: 48,   // escalate if review confirmation doesn't arrive
   },
 
+  // ─── 30/60/90-day review summary-sharing step ──────────────────────────────
+  // Days after the review call before asking the recruiter to confirm they've
+  // shared the review summary with the new joinee (Step 4/5 of HR's spec).
+  reviewSummaryShareDelayDays: 1,
+
   // ─── Calendar event times (24-hour, IST) ───────────────────────────────────
   calendarEvents: {
     hrInduction:    { hour: 10, minute: 30, durationMins: 90 }, // DOJ 10:30–12 PM
     projectIntro:   { hour: 14, minute: 0,  durationMins: 60 }, // DOJ+3 days 2–3 PM
-    catchup25day:   { hour: 11, minute: 0,  durationMins: 30 }, // day 25 11–11:30 AM
+    catchup25day:   { hour: 11, minute: 0,  durationMins: 15, reminderDelayHours: 2 }, // day 25 11–11:15 AM; recruiter reminder fires 2h after call start
     catchup30day:   { hour: 11, minute: 0,  durationMins: 30 }, // day 30 11–11:30 AM
     reviewMeeting:  { hour: 15, minute: 0,  durationMins: 60 }, // day 60/90 3–4 PM
     projectIntroDayOffset: 3, // days after DOJ for project intro meeting
   },
 
   // ─── Drive folder structure ─────────────────────────────────────────────────
-  driveSubfolders: ['Aadhaar', 'PAN', 'Current_Address_Proof', 'Permanent_Address_Proof', 'Offer_Letter', 'Passport_Photo', 'Passport', 'UAN', 'Payslip', 'Relieving_Letter', 'Marksheet_10th', 'Marksheet_12th', 'Degree_Certificate', 'Postgrad_Certificate', 'BGV', 'HR_Induction_Screenshot', 'Project_Intro_Screenshot', 'Reports'],
+  driveSubfolders: ['Aadhaar', 'PAN', 'Current_Address_Proof', 'Permanent_Address_Proof', 'Offer_Letter', 'Passport_Photo', 'Passport', 'UAN', 'Payslip', 'Relieving_Letter', 'Marksheet_10th', 'Marksheet_12th', 'Degree_Certificate', 'Postgrad_Certificate', 'BGV', 'HR_Induction_Screenshot', 'Project_Intro_Screenshot', 'Catchup25_Screenshot', 'Reports'],
 
   // ─── Pre-onboarding form file-upload question → Drive subfolder ────────────
   // Must stay in sync with FOLDER_MAP in scripts/createFresherPreonboardingForm.gs

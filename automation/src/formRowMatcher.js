@@ -22,7 +22,11 @@ function findLatestFormRow(rows, employee) {
   const nameColIdx = headers.findIndex(h => { const t = h.trim().toLowerCase(); return t === 'full name' || t === 'name' || t.startsWith('full name('); });
 
   const empName = (employee.name || '').trim().toLowerCase();
-  const empEmail = (employee.personalEmail || '').trim().toLowerCase();
+  // Match either address — forms filled after DOJ (e.g. the day-23 survey) collect the
+  // joinee's official Google account email, not the personal one.
+  const empEmails = [employee.personalEmail, employee.officialEmail]
+    .map(e => (e || '').trim().toLowerCase())
+    .filter(Boolean);
 
   const matches = [];
   for (let r = 1; r < rows.length; r++) {
@@ -32,7 +36,7 @@ function findLatestFormRow(rows, employee) {
     const rowName = nameColIdx !== -1 ? (row[nameColIdx] || '').trim().toLowerCase() : '';
     let isMatch = false;
     if (rowEmpId && employee.employeeId && rowEmpId.toUpperCase() === employee.employeeId.toUpperCase()) isMatch = true;
-    else if (empEmail && rowEmail && rowEmail === empEmail) isMatch = true;
+    else if (rowEmail && empEmails.includes(rowEmail)) isMatch = true;
     else if (empName && rowName && (rowName === empName || rowName.includes(empName) || empName.includes(rowName))) isMatch = true;
     if (isMatch) matches.push({ row, isTest: isTestFormRow(row) });
   }

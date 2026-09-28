@@ -5,7 +5,7 @@ const path = require('path');
 const fs   = require('fs');
 const { google } = require('googleapis');
 const { decrypt } = require('./encryption');
-const { send25DayCatchupEmail, sendEmail } = require('./emailSender');
+const { send25DayCatchupEmail } = require('./emailSender');
 const { getOrCreateCatchupSheet, mark25DayCatchupDone } = require('./statusTracker');
 const { create25DayCatchupEvent } = require('./calendarService');
 const config = require('./config');
@@ -46,44 +46,11 @@ async function run() {
   if (catchupUrl) console.log(`  ✓ Catchup sheet created: ${catchupUrl}`);
 
   // Create calendar event
-  let catchupCalendarLink = null;
-  let catchupDateStr = null;
   const calResult = await create25DayCatchupEvent(auth, employee).catch(err => {
     console.warn('  Calendar event failed:', err.message);
     return null;
   });
-  if (calResult) {
-    catchupCalendarLink = calResult.htmlLink;
-    const cfg = config.calendarEvents.catchup25day;
-    const d = calResult.eventDate;
-    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    const hour = cfg.hour > 12 ? cfg.hour - 12 : cfg.hour;
-    const ampm = cfg.hour >= 12 ? 'PM' : 'AM';
-    catchupDateStr = `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()} at ${hour}:${String(cfg.minute).padStart(2,'0')} ${ampm} IST`;
-    console.log('  ✓ Calendar event created:', catchupDateStr);
-  }
-
-  // Send feedback form + catchup email to new joinee
-  const feedbackFormLink = process.env.EMPLOYEE_FEEDBACK_FORM_LINK;
-  const formSection = feedbackFormLink
-    ? `<p><a href="${feedbackFormLink}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;display:inline-block;">Employee Feedback Form</a></p>`
-    : `<p style="color:#e65100;">Feedback form link not configured — HR will share it separately.</p>`;
-  const catchupSection = catchupDateStr
-    ? `<p>You also have a <strong>25-Day Catchup Call</strong> scheduled on <strong>${catchupDateStr}</strong>. Please check your calendar for the invite${catchupCalendarLink ? ` or <a href="${catchupCalendarLink}">view the event here</a>` : ''}.</p>`
-    : `<p>Your HR team will be in touch to schedule a 25-day catchup call with you soon.</p>`;
-
-  await sendEmail({
-    to: employee.officialEmail || employee.personalEmail,
-    subject: `Employee Feedback Form — ${process.env.COMPANY_NAME}`,
-    html: `
-      <p>Dear ${employee.name},</p>
-      <p>You've been with us for 25 days! Please take a moment to fill in the employee feedback form:</p>
-      ${formSection}
-      ${catchupSection}
-      <p>Regards,<br/>HR Team, ${process.env.COMPANY_NAME}</p>
-    `,
-  }).catch(e => console.warn('  Feedback form email failed:', e.message));
-  console.log('  ✓ Feedback form email sent to joinee');
+  if (calResult) console.log('  ✓ Calendar event created:', calResult.htmlLink);
 
   // Send 25-day catchup email to HR/recruiter
   await send25DayCatchupEmail(employee, { meetLink: employee.meetLinks && employee.meetLinks['25day-catchup'] }).catch(e => console.warn('  25-day catchup HR email failed:', e.message));

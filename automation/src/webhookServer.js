@@ -869,10 +869,10 @@ app.get('/status', statusLimiter, (_req, res) => {
     'HR induction scheduled':                 ['t27'],
     'Project intro meeting scheduled':        ['t29'],
     'Day of Joining — onboarding complete':   ['t42'],
-    '25th day catchup call completed':        ['t63'],
-    '30-day catchup completed':               ['t43'],
-    '60-day review completed':                ['t46'],
-    '90-day review completed':                ['t49'],
+    '25th day catchup call completed':        ['t65'],
+    '30-day catchup completed':               ['t45'],
+    '60-day review completed':                ['t48'],
+    '90-day review completed':                ['t51'],
     'Pre-probation verification completed':   ['t52'],
   };
 

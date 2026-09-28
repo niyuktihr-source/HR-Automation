@@ -33,7 +33,7 @@ function getTransporter() {
 // Every outgoing email is automatically CC'd to AUDIT_CC_EMAIL (default: hr@alethea.in)
 // so HR can trace all automation activity from one inbox.
 // Set AUDIT_CC_EMAIL= (empty) in .env to disable the audit CC.
-async function sendEmail({ to, subject, html }, retries = 3) {
+async function sendEmail({ to, subject, html, attachments, cc: extraCc }, retries = 3) {
   const sender = process.env.GMAIL_USER;
   const fromName = process.env.COMPANY_NAME ? `${process.env.COMPANY_NAME} HR` : 'HR Team';
 
@@ -42,7 +42,10 @@ async function sendEmail({ to, subject, html }, retries = 3) {
     ? process.env.AUDIT_CC_EMAIL          // explicit env (can be '' to disable)
     : 'hr@alethea.in';                    // default
   const toAddresses = String(to || '').toLowerCase();
-  const cc = auditCc && !toAddresses.includes(auditCc.toLowerCase()) ? auditCc : undefined;
+  const ccList = [extraCc, auditCc && !toAddresses.includes(auditCc.toLowerCase()) ? auditCc : null]
+    .filter(Boolean)
+    .filter((addr, i, all) => all.findIndex(a => a.toLowerCase() === addr.toLowerCase()) === i);
+  const cc = ccList.length ? ccList.join(', ') : undefined;
 
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -54,6 +57,7 @@ async function sendEmail({ to, subject, html }, retries = 3) {
         html,
       };
       if (cc) mailOpts.cc = cc;
+      if (attachments && attachments.length) mailOpts.attachments = attachments;
       const info = await transporter.sendMail(mailOpts);
       console.log(`[Email] Sent to ${to}${cc ? ` (CC: ${cc})` : ''} — ${subject} (${info.messageId})`);
       return info;
@@ -416,80 +420,6 @@ async function sendHRInductionConfirmation(employee, recruiterEmail) {
   });
 }
 
-// Template 10: 60/90-day review reminder
-async function sendPeriodicReviewReminder(employee, recruiterEmail, managerEmail, dayMark) {
-  const { name, employeeId } = employee;
-  const co = esc(process.env.COMPANY_NAME || '');
-  const joineeEmail = employee.officialEmail || employee.personalEmail;
-
-  // Month tab: 30→Month -1, 60→Month -2, 90→Month -3
-  const monthTab = dayMark === 30 ? 'Tracking - Month -1' : dayMark === 60 ? 'Tracking - Month -2' : 'Tracking - Month -3';
-
-  // Get tracking sheet URL from projectIntroSheetId (New Joinee & Task Tracker)
-  let sheetUrl = employee.projectIntroSheetId
-    ? `https://docs.google.com/spreadsheets/d/${employee.projectIntroSheetId}`
-    : null;
-
-  if (!sheetUrl && employee._auth && employee.driveFolderId) {
-    try {
-      const drive = google.drive({ version: 'v3', auth: employee._auth });
-      const res = await drive.files.list({
-        q: `'${employee.driveFolderId}' in parents and name contains 'New Joinee' and trashed=false`,
-        fields: 'files(id)',
-        pageSize: 5,
-      });
-      if (res.data.files.length > 0) {
-        sheetUrl = `https://docs.google.com/spreadsheets/d/${res.data.files[0].id}`;
-      }
-    } catch (err) {
-      console.warn(`[Email] Could not look up tracking sheet for ${name}: ${err.message}`);
-    }
-  }
-
-  const sheetSection = sheetUrl
-    ? `<p style="margin:16px 0;"><a href="${sheetUrl}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;">Open Tracking Sheet — ${esc(monthTab)}</a></p>`
-    : '';
-
-  // Email to manager only — tracking sheet link + instructions
-  if (managerEmail) {
-    await sendEmail({
-      to: managerEmail,
-      subject: `Action Required — ${dayMark}-Day Project Review for ${esc(name)} (${esc(employeeId)})`,
-      html: `
-        <p>Hi,</p>
-        <div style="margin:16px 0;padding:12px 16px;background:#fff8e1;border-left:4px solid #ffa000;border-radius:2px;">
-          <p style="margin:0 0 4px;font-weight:bold;color:#333;">What this email is about</p>
-          <p style="margin:0;color:#555;">It has been <strong>${dayMark} days</strong> since <strong>${esc(name)}</strong> (ID: ${esc(employeeId)}) joined ${co}. The <strong>${dayMark}-day project review</strong> is now due. This is a structured check-in to assess progress, discuss any challenges, and set expectations for the next phase. Two steps are required after the call:</p>
-          <ol style="margin:8px 0 0;color:#555;">
-            <li>The recruiter fills their section in the <strong>${esc(monthTab)}</strong> tab of the tracking sheet</li>
-            <li>You (the manager) confirm the review call was completed by replying "Done" to a follow-up email — that is what closes this milestone</li>
-          </ol>
-        </div>
-        <p>Please schedule and conduct the review call at the earliest. The tracking sheet is linked below for reference:</p>
-        ${sheetSection}
-        <p>Regards,<br/>${co} HR</p>
-      `,
-    });
-  }
-
-  // Separate simple email to new joinee
-  if (joineeEmail) {
-    await sendEmail({
-      to: joineeEmail,
-      subject: `${dayMark}-Day Review — ${esc(name)}, your manager will be scheduling a call`,
-      html: `
-        <p>Hi ${esc(name)},</p>
-        <div style="margin:16px 0;padding:12px 16px;background:#fff8e1;border-left:4px solid #ffa000;border-radius:2px;">
-          <p style="margin:0 0 4px;font-weight:bold;color:#333;">What this email is about</p>
-          <p style="margin:0;color:#555;">It has been <strong>${dayMark} days</strong> since you joined ${co}. As part of your onboarding, your manager will schedule a <strong>${dayMark}-day project review call</strong> with you. This is a check-in to discuss your progress, any challenges you are facing, and goals for the next phase.</p>
-        </div>
-        <p>Please check your calendar for the meeting invite from your manager and come prepared to discuss your progress and any questions you have.</p>
-        <p>Regards,<br/>${co} HR</p>
-      `,
-    });
-  }
-}
-
 // Template 11: Pre-probation reminder (5 months)
 async function sendPreProbationReminder(employee, managerEmail) {
   const { name, employeeId } = employee;
@@ -840,85 +770,146 @@ async function sendReviewSummaryRequest(employee, dayMark, calendarLinks = {}) {
   });
 }
 
-// Template 18c2: Day 30 technical review & catchup call
-async function send30DayTechnicalReview(employee, calendarLinks = {}) {
-  const { name, employeeId, contacts } = employee;
-  const co = esc(process.env.COMPANY_NAME || '');
-  const joineeEmail = employee.officialEmail || employee.personalEmail;
-  const managerEmail = contacts && contacts.managerEmail;
-  const monthTab = 'Tracking - Month -1';
+// Room booking fallback — the invite went out (with its Meet link) but no meeting room
+// could be booked, so HR + the recruiter need to arrange one by hand.
+async function sendRoomUnavailableAlert(employee, meetingLabel, startIso, reason, eventLink) {
+  const { name, employeeId } = employee;
+  const co = esc(process.env.COMPANY_NAME || 'Alethea');
+  const to = [resolveHrEmail(employee), (employee.contacts || {}).recruiterEmail].filter(Boolean).join(', ');
+  if (!to) return;
+  const when = new Date(startIso).toLocaleString('en-IN', {
+    weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
+    hour: 'numeric', minute: '2-digit', timeZone: 'Asia/Kolkata',
+  });
 
-  // Find personalized catchup sheet URL
-  let sheetUrl = await resolveCatchupSheetUrl(employee);
-  if (!sheetUrl && employee.projectIntroSheetId) {
-    sheetUrl = `https://docs.google.com/spreadsheets/d/${employee.projectIntroSheetId}`;
-  }
-  if (!sheetUrl && employee._auth && employee.driveFolderId) {
-    try {
-      const drive = google.drive({ version: 'v3', auth: employee._auth });
-      const res = await drive.files.list({
-        q: `'${employee.driveFolderId}' in parents and (name contains 'Catchup' or name contains 'New Joinee') and trashed=false`,
-        fields: 'files(id)',
-        pageSize: 5,
-      });
-      if (res.data.files.length > 0) {
-        sheetUrl = `https://docs.google.com/spreadsheets/d/${res.data.files[0].id}`;
-      }
-    } catch (err) {
-      console.warn(`[Email] Could not look up tracking sheet for ${name}: ${err.message}`);
-    }
+  return sendEmail({
+    to,
+    subject: `Action Required — No Meeting Room Booked: ${esc(meetingLabel)} for ${esc(name)} (${esc(employeeId)})`,
+    html: `
+      <p>Hi,</p>
+      <p>The <strong>${esc(meetingLabel)}</strong> for <strong>${esc(name)}</strong> (${esc(employeeId)}) on <strong>${esc(when)} IST</strong> has been scheduled, but <strong>no meeting room could be booked</strong>: ${esc(reason)}.</p>
+      <p>The calendar invite has been sent with a Google Meet link. Please book a room manually, or let attendees know the meeting is online.</p>
+      ${eventLink ? `<p style="margin:16px 0;"><a href="${eventLink}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;display:inline-block;">Open Calendar Event</a></p>` : ''}
+      <p>Regards,<br/>${co} HR</p>
+    `,
+  });
+}
+
+// The joinee's own day-23 form, or the legacy shared form for joinees sent it before
+// per-joinee forms existed.
+function resolveSurveyLink(employee) {
+  return (employee.onboardingSurveyForm && employee.onboardingSurveyForm.responderUrl)
+    || process.env.ONBOARDING_SURVEY_LINK
+    || null;
+}
+
+// Template 17b: Day 23 onboarding survey — sent to the new joinee, linking their own copy of
+// "Employee Feedback Form: Onboarding Experience"
+async function sendOnboardingSurveyForm(employee) {
+  const { name } = employee;
+  const co = esc(process.env.COMPANY_NAME || 'Alethea');
+  const to = employee.officialEmail || employee.personalEmail;
+  if (!to) return;
+
+  const surveyLink = resolveSurveyLink(employee);
+  const linkSection = surveyLink
+    ? `<p style="margin:16px 0;"><a href="${surveyLink}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;display:inline-block;">Fill Onboarding Survey</a></p>`
+    : `<p style="color:#e65100;"><strong>Note:</strong> The survey link has not been configured yet. HR will share it with you separately.</p>`;
+
+  return sendEmail({
+    to,
+    subject: `Onboarding Survey — ${co}`,
+    html: `
+      <p>Hi ${esc(name)},</p>
+      <p>It's been 23 days since you joined ${co}! Please take a few minutes to fill in the onboarding survey so we can hear how your first few weeks have gone:</p>
+      ${linkSection}
+      <p>If you have any questions, feel free to reach out to HR.</p>
+      <p>Regards,<br/>${co} HR</p>
+    `,
+  });
+}
+
+// Template 17c: Day 23 onboarding survey — recruiter notice, sent alongside the joinee email.
+// The recruiter has edit access to the joinee's form, so they can watch responses come in.
+async function sendOnboardingSurveyRecruiterNotice(employee) {
+  const { name, employeeId } = employee;
+  const co = esc(process.env.COMPANY_NAME || 'Alethea');
+  const recruiterEmail = (employee.contacts || {}).recruiterEmail;
+  if (!recruiterEmail) return;
+
+  const form = employee.onboardingSurveyForm;
+  const surveyLink = resolveSurveyLink(employee);
+  let linkSection;
+  if (form && form.editUrl) {
+    linkSection = `<p>You have been given <strong>edit access</strong> to ${esc(name)}'s form — open it and go to the <strong>Responses</strong> tab to see their answers:</p>
+      <p style="margin:16px 0;"><a href="${form.editUrl}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;display:inline-block;">Open ${esc(name)}'s Form</a></p>`;
+  } else if (surveyLink) {
+    linkSection = `<p>For your reference, here is the form link:</p><p style="margin:16px 0;"><a href="${surveyLink}">${surveyLink}</a></p>`;
+  } else {
+    linkSection = `<p style="color:#e65100;">Survey link not configured.</p>`;
   }
 
-  const managerSheetSection = sheetUrl
-    ? `<p style="margin:16px 0;"><a href="${sheetUrl}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;display:inline-block;">Open 30-Day Catchup Sheet — ${esc(monthTab)}</a></p>`
+  return sendEmail({
+    to: recruiterEmail,
+    subject: `Onboarding Survey Sent — ${esc(name)} (${esc(employeeId)})`,
+    html: `
+      <p>Hi,</p>
+      <p>The <strong>Employee Feedback Form: Onboarding Experience</strong> has been sent to <strong>${esc(name)}</strong> (${esc(employeeId)}) on their 23rd day.</p>
+      ${linkSection}
+      <p>Once they have answered every question, you'll receive their response as an Excel (.xlsx) attachment. A copy is also saved in their Drive folder.</p>
+      <p>Regards,<br/>${co} HR</p>
+    `,
+  });
+}
+
+// Template 17d: Day 23 onboarding survey — reminder to joinee if not yet completed
+async function sendOnboardingSurveyReminder(employee) {
+  const { name } = employee;
+  const co = esc(process.env.COMPANY_NAME || 'Alethea');
+  const to = employee.officialEmail || employee.personalEmail;
+  if (!to) return;
+
+  const surveyLink = resolveSurveyLink(employee);
+  const linkSection = surveyLink
+    ? `<p style="margin:16px 0;"><a href="${surveyLink}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;display:inline-block;">Fill Onboarding Survey</a></p>`
     : '';
 
-  const joineeSheetSection = sheetUrl
-    ? `<p style="margin:16px 0;"><a href="${sheetUrl}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;display:inline-block;">Open 30-Day Catchup Sheet</a></p>`
+  return sendEmail({
+    to,
+    subject: `Reminder — Please Fill the Onboarding Survey`,
+    html: `
+      <p>Hi ${esc(name)},</p>
+      <p>Just a friendly reminder to fill in your onboarding survey when you get a chance:</p>
+      ${linkSection}
+      <p>Regards,<br/>${co} HR</p>
+    `,
+  });
+}
+
+// Template 17e: Day 23 onboarding survey — sent to the recruiter once the joinee has
+// answered every question, with their response attached as .xlsx
+async function sendOnboardingSurveyResponseToRecruiter(employee, responseUrl, xlsxAttachment) {
+  const { name, employeeId } = employee;
+  const co = esc(process.env.COMPANY_NAME || 'Alethea');
+  const recruiterEmail = (employee.contacts || {}).recruiterEmail;
+  if (!recruiterEmail) return;
+
+  const linkSection = responseUrl
+    ? `<p>A copy is also saved in their Drive folder:</p>
+       <p style="margin:16px 0;"><a href="${responseUrl}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;display:inline-block;">View in Google Sheets</a></p>`
     : '';
 
-  const meetLink = calendarLinks.meetLink || (employee.meetLinks && employee.meetLinks['30day-catchup']) || null;
-  const meetSection = meetLink
-    ? `<p style="margin:16px 0;"><a href="${meetLink}" style="background:#0F9D58;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;display:inline-block;">Join Google Meet</a></p>`
-    : '';
-
-  // Manager email — with tracking sheet
-  if (managerEmail) {
-    await sendEmail({
-      to: managerEmail,
-      subject: `Reminder — 30-Day Catchup & Project Review for ${esc(name)} (${esc(employeeId)})`,
-      html: `
-        <p>Hi,</p>
-        <p>The <strong>30-day catchup call and project review</strong> for <strong>${esc(name)}</strong> (ID: ${esc(employeeId)}) is due.</p>
-        <p>Please conduct the catchup call. After the call:</p>
-        <ol>
-          <li>Fill in the <strong>${esc(monthTab)}</strong> tab in the catchup tracking sheet below</li>
-          <li>Reply to this email confirming the review was completed</li>
-        </ol>
-        ${managerSheetSection}
-        ${meetSection}
-        <p>If the call cannot happen soon, reply with the new proposed date.</p>
-        <p>Regards,<br/>${co} HR</p>
-      `,
-    });
-  }
-
-  // Joinee email — with personalized catchup sheet link
-  if (joineeEmail) {
-    await sendEmail({
-      to: joineeEmail,
-      subject: `30-Day Catchup Call & Review — ${esc(name)} (${esc(employeeId)})`,
-      html: `
-        <p>Hi ${esc(name)},</p>
-        <p>It has been 30 days since you joined ${co}. Time for your <strong>30-day catchup call and project review!</strong></p>
-        <p>Your recruiter and reporting manager will connect with you. Please check your calendar for the review meeting invite and review your personalized catchup sheet:</p>
-        ${joineeSheetSection}
-        ${meetSection}
-        <p>Please come prepared to discuss your progress, any challenges, and goals for the next month.</p>
-        <p>Regards,<br/>${co} HR</p>
-      `,
-    });
-  }
+  return sendEmail({
+    to: recruiterEmail,
+    subject: `Onboarding Survey Response — ${esc(name)} (${esc(employeeId)})`,
+    html: `
+      <p>Hi,</p>
+      <p><strong>${esc(name)}</strong> (${esc(employeeId)}) has completed the Employee Feedback Form: Onboarding Experience.${xlsxAttachment ? ' Their response is attached as an Excel file.' : ''}</p>
+      ${linkSection}
+      <p>Regards,<br/>${co} HR</p>
+    `,
+    attachments: xlsxAttachment ? [xlsxAttachment] : undefined,
+  });
 }
 
 // Template 18c: Day 25 catchup call notification — sent to HR + recruiter on day 25
@@ -940,13 +931,16 @@ async function send25DayCatchupEmail(employee, calendarLinks = {}) {
   const meetSection = meetLink
     ? `<p style="margin:16px 0;"><a href="${meetLink}" style="background:#0F9D58;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;display:inline-block;">Join Google Meet</a></p>`
     : '';
+  const scheduledOnSection = calendarLinks.eventDateStr
+    ? ` was scheduled on <strong>${esc(calendarLinks.eventDateStr)}</strong>.`
+    : '.';
 
   return sendEmail({
     to: toEmail,
     subject: `25th Day Catchup Call — ${esc(name)} (${esc(employeeId)})`,
     html: `
       <p>Hi,</p>
-      <p>This is a reminder that the <strong>25th day catchup call</strong> for <strong>${esc(name)}</strong> is due today. Please schedule or confirm the call.</p>
+      <p>This is a reminder that the <strong>25th day catchup call</strong> for <strong>${esc(name)}</strong>${scheduledOnSection}</p>
       <table style="border-collapse:collapse;font-size:14px;">
         <tr><td style="padding:4px 12px 4px 0;color:#555;"><strong>Employee Name</strong></td><td>${esc(name)}</td></tr>
         <tr><td style="padding:4px 12px 4px 0;color:#555;"><strong>Employee ID</strong></td><td>${esc(employeeId)}</td></tr>
@@ -961,8 +955,32 @@ async function send25DayCatchupEmail(employee, calendarLinks = {}) {
       <br/>
       <p>Recruiter — please fill in the <a href="${sheetLink}">catchup tracking sheet</a> after the call.</p>
       ${meetSection}
-      <p>HR — once the call is done, reply to this email with <strong>"Confirmed"</strong> to update the checklist.</p>
+      <p>Since you have completed the call and the catchup tracking sheet is filled, reply to this email with <strong>"Confirmed"</strong> and upload a screenshot of the meeting (as an attachment on this reply) to mark this activity as completed.</p>
       <p>Regards,<br/>${co} HR</p>
+    `,
+  });
+}
+
+// Template 18d: 25-day catchup summary — sent to manager + recruiter once the
+// recruiter has filled the catchup tracking sheet (AI-summarized discussion notes)
+async function send25DayCatchupSummary(employee, summaryText) {
+  const { name } = employee;
+  const contacts = employee.contacts || {};
+  const managerEmail = contacts.managerEmail || '';
+  const recruiterEmail = contacts.recruiterEmail || '';
+  const toEmail = [managerEmail, recruiterEmail].filter(Boolean).join(', ');
+  if (!toEmail) return;
+
+  return sendEmail({
+    to: toEmail,
+    subject: `25th Day Catchup Summary — ${esc(name)}`,
+    html: `
+      <p>Dear Manager,</p>
+      <p>We had a catch-up with ${esc(name)} to understand how they are settling into the role and their experience so far.</p>
+      <p>Please find below the key points from the discussion:</p>
+      <p style="white-space:pre-wrap;">${esc(summaryText)}</p>
+      <p>Sharing this for your visibility and any follow-up, where required.</p>
+      <p>Regards,<br/>HR Team</p>
     `,
   });
 }
@@ -1170,107 +1188,59 @@ async function sendOnboardingCompletionReport(employee) {
   });
 }
 
-// Simple review/catchup notification to the new joinee (day 25/30/60/90)
-async function sendJoineeReviewNotification(employee, dayMark, calendarLinks = {}) {
-  const { name, officialEmail, personalEmail } = employee;
-  const co = esc(process.env.COMPANY_NAME || 'Alethea');
-  const to = officialEmail || personalEmail;
-  if (!to) return;
-
-  const labels = {
-    25: { subject: `Your 25-Day Catchup Call — ${esc(name)}`, body: `This is a reminder that your <strong>25-day catchup call</strong> is scheduled. Your recruiter will reach out to connect with you. Please be available and share any feedback or concerns you have so far.` },
-    30: { subject: `Your 30-Day Catchup Call & Review — ${esc(name)}`, body: `You have completed <strong>30 days</strong> at ${co}! Your 30-day catchup call with your recruiter and reporting manager is scheduled. They will connect with you to discuss your progress, challenges, and goals for the next month.` },
-    60: { subject: `Your 60-Day Review — ${esc(name)}`, body: `You have completed <strong>60 days</strong> at ${co}! Your 60-day review call is scheduled. Your manager and recruiter will discuss your project progress and set goals for the next phase.` },
-    90: { subject: `Your 90-Day Review — ${esc(name)}`, body: `You have completed <strong>90 days</strong> at ${co}! Your 90-day review call is coming up. This is your final probation review — your manager and recruiter will assess your progress and confirm probation clearance.` },
-  };
-
-  const { subject, body } = labels[dayMark] || { subject: `Review Call — ${esc(name)}`, body: `Your ${dayMark}-day review is scheduled.` };
-
-  let sheetSection = '';
-  if (dayMark === 25 || dayMark === 30) {
-    const sheetUrl = await resolveCatchupSheetUrl(employee);
-    if (sheetUrl) {
-      sheetSection = `<p style="margin:16px 0;"><a href="${sheetUrl}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;display:inline-block;">Open Catchup Sheet</a></p>`;
-    }
-  }
-  const actionKey = dayMark === 25 || dayMark === 30 ? `${dayMark}day-catchup` : `${dayMark}day-review`;
-  const meetLink = calendarLinks.meetLink || (employee.meetLinks && employee.meetLinks[actionKey]) || null;
-  const meetSection = meetLink
-    ? `<p style="margin:16px 0;"><a href="${meetLink}" style="background:#0F9D58;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;display:inline-block;">Join Google Meet</a></p>`
-    : '';
-
-  return sendEmail({
-    to,
-    subject,
-    html: `
-      <p>Hi ${esc(name)},</p>
-      <p>${body}</p>
-      ${sheetSection}
-      ${meetSection}
-      <p>If you have any questions or concerns before the call, feel free to reach out to HR.</p>
-      <p>Regards,<br/>${co} HR</p>
-    `,
-  });
+// Day-before reminder — sent to joinee + HR/recruiter the day before a milestone
+// { subject, body } wording for when a call happens, relative to today.
+function describeCallDay(callDate) {
+  if (!callDate) return { subject: 'Tomorrow', body: 'tomorrow' };
+  const d = new Date(callDate);
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  if (d.toDateString() === tomorrow.toDateString()) return { subject: 'Tomorrow', body: 'tomorrow' };
+  const label = d.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' });
+  return { subject: `on ${label}`, body: label };
 }
 
-// Day-before reminder — sent to joinee + HR/recruiter the day before a milestone
-async function sendDayBeforeReminder(employee, dayMark) {
-  const { name, officialEmail, personalEmail } = employee;
+async function sendDayBeforeReminder(employee, dayMark, milestoneDate) {
+  const { name, officialEmail, personalEmail, employeeId } = employee;
   const co = esc(process.env.COMPANY_NAME || 'Alethea');
   const joineeEmail = officialEmail || personalEmail;
   const recruiterEmail = (employee.contacts || {}).recruiterEmail || '';
-  const hrEmailAddr = resolveHrEmail(employee);
+  const managerEmail = (employee.contacts || {}).managerEmail || '';
 
-  const labels = {
-    25: {
-      joineeSubject: `Heads-up — Your 25-Day Catchup Call is Tomorrow`,
-      joineeBody: `Your <strong>25-day catchup call</strong> is scheduled for tomorrow. Your recruiter will reach out to connect with you. Please be available and come prepared with any feedback, questions, or concerns you'd like to share about your first 25 days.`,
-      internalSubject: `Tomorrow — 25-Day Catchup Call for ${esc(name)} (${esc(employee.employeeId)})`,
-      internalBody: `The <strong>25-day catchup call</strong> for <strong>${esc(name)}</strong> (${esc(employee.employeeId)}) is tomorrow.<br/><br/><strong>What needs to happen:</strong> The recruiter should connect with the employee, collect their feedback on the first 25 days, and note any concerns. After the call, the employee will receive an onboarding feedback form email (this is automated). No manual action is needed after the call unless there are concerns to flag.`,
-    },
-    30: {
-      joineeSubject: `Heads-up — Your 30-Day Review is Tomorrow`,
-      joineeBody: `Your <strong>30-day project review</strong> is scheduled for tomorrow. Your manager will connect with you to discuss how the first month has gone — your progress, any challenges, and goals going forward. Please check your calendar for the invite and come prepared.`,
-      internalSubject: `Tomorrow — 30-Day Review for ${esc(name)} (${esc(employee.employeeId)})`,
-      internalBody: `The <strong>30-day project review</strong> for <strong>${esc(name)}</strong> (${esc(employee.employeeId)}) is tomorrow.<br/><br/><strong>What needs to happen after the call:</strong><ol><li>Recruiter fills the <strong>Tracking - Month -1</strong> tab in the tracking sheet (the "Filled by Recruiter" section)</li><li>Once filled, the system will automatically email the manager to confirm — manager replies "Done" to close the milestone</li></ol>Please ensure the review call is scheduled and the tracking sheet is ready.`,
-    },
-    60: {
-      joineeSubject: `Heads-up — Your 60-Day Review is Tomorrow`,
-      joineeBody: `Your <strong>60-day project review</strong> is scheduled for tomorrow. Your manager will connect with you to discuss your progress over the last two months and set goals for the next phase. Please check your calendar and come prepared.`,
-      internalSubject: `Tomorrow — 60-Day Review for ${esc(name)} (${esc(employee.employeeId)})`,
-      internalBody: `The <strong>60-day project review</strong> for <strong>${esc(name)}</strong> (${esc(employee.employeeId)}) is tomorrow.<br/><br/><strong>What needs to happen after the call:</strong><ol><li>Recruiter fills the <strong>Tracking - Month -2</strong> tab in the tracking sheet (the "Filled by Recruiter" section)</li><li>Once filled, the system will automatically email the manager to confirm — manager replies "Done" to close the milestone</li></ol>Please ensure the review call is arranged and the tracking sheet is ready.`,
-    },
-    90: {
-      joineeSubject: `Heads-up — Your 90-Day Probation Review is Tomorrow`,
-      joineeBody: `Your <strong>90-day probation review</strong> is scheduled for tomorrow. This is your final probation review — your manager will assess your overall progress and confirm probation clearance. Please check your calendar and come well prepared.`,
-      internalSubject: `Tomorrow — 90-Day Probation Review for ${esc(name)} (${esc(employee.employeeId)})`,
-      internalBody: `The <strong>90-day probation review</strong> for <strong>${esc(name)}</strong> (${esc(employee.employeeId)}) is tomorrow. This is the final review before probation confirmation.<br/><br/><strong>What needs to happen after the call:</strong><ol><li>Recruiter fills the <strong>Tracking - Month -3</strong> tab in the tracking sheet (the "Filled by Recruiter" section)</li><li>Once filled, the system will automatically email the manager to confirm — manager replies "Done" to close the milestone</li><li>After the 90-day milestone is closed, the 5-month pre-probation verification will be triggered automatically</li></ol>Please ensure the review call is arranged and the tracking sheet is ready.`,
-    },
-  };
-
-  const l = labels[dayMark];
-  if (!l) return;
-
-  const promises = [];
-
-  if (joineeEmail) {
-    promises.push(sendEmail({
+  // 25-day keeps its own simple joinee-only heads-up (unrelated to the HR spec below).
+  if (dayMark === 25) {
+    if (!joineeEmail) return;
+    // "Tomorrow" only when the call really is the next calendar day (a Friday
+    // heads-up for a Monday call names the day instead).
+    const callWhen = describeCallDay(milestoneDate);
+    return sendEmail({
       to: joineeEmail,
-      subject: l.joineeSubject,
-      html: `<p>Hi ${esc(name)},</p><p>${l.joineeBody}</p><p>If you have any questions before the call, feel free to reach out to HR.</p><p>Regards,<br/>${co} HR</p>`,
-    }));
+      subject: `Heads-up — Your 25-Day Catchup Call is ${callWhen.subject}`,
+      html: `<p>Hi ${esc(name)},</p><p>Your <strong>25-day catchup call</strong> is scheduled for ${callWhen.body}. Your recruiter will reach out to connect with you. Please be available and come prepared with any feedback, questions, or concerns you'd like to share about your first 25 days.</p><p>If you have any questions before the call, feel free to reach out to HR.</p><p>Regards,<br/>${co} HR</p>`,
+    });
   }
 
-  const internalTo = [recruiterEmail, hrEmailAddr].filter(Boolean).join(', ');
-  if (internalTo) {
-    promises.push(sendEmail({
-      to: internalTo,
-      subject: l.internalSubject,
-      html: `<p>Hi,</p>${l.internalBody}<p>Regards,<br/>${co} HR Automation</p>`,
-    }));
-  }
+  // 30/60/90-day: single email to recruiter + manager, per HR's exact spec content.
+  const monthTab = dayMark === 30 ? 'Tracking - Month -1' : dayMark === 60 ? 'Tracking - Month -2' : 'Tracking - Month -3';
+  const to = [recruiterEmail, managerEmail].filter(Boolean).join(', ');
+  if (!to) return;
 
-  await Promise.all(promises);
+  return sendEmail({
+    to,
+    subject: `${dayMark}-Day Progress Check-In — ${esc(name)} (${esc(employeeId)}) will be scheduled shortly`,
+    html: `
+      <p>Hi,</p>
+      <p>The <strong>${dayMark} day Progress Check-In</strong> for <strong>${esc(name)}</strong> (${esc(employeeId)}) will be scheduled shortly. Please ensure the review call is done as per schedule.</p>
+      <p>After the call please do the below detailed steps</p>
+      <ul>
+        <li>Recruiter must fill the <strong>${esc(monthTab)}</strong> tab in the tracking sheet (the "Filled by Recruiter" section)</li>
+        <li>Manager must fill the <strong>${esc(monthTab)}</strong> tab in the tracking sheet (the "Filled by Manager" section)</li>
+        <li>The system will email the <strong>${esc(monthTab)}</strong> tab in the Tracking sheet to the reporting manager to confirm — the manager must reply "Confirmed" to close the milestone</li>
+        <li>The system will email the Tracking sheet to the recruiter to confirm — the recruiter must upload a screenshot of the meeting to the email and also reply "Confirmed" to close the milestone</li>
+      </ul>
+      <p>Regards,<br/>${co} Automation</p>
+    `,
+  });
 }
 
 // Simple onboarding complete email to the new joinee
@@ -1433,32 +1403,87 @@ async function sendRecruiterSheetReminder(employee, recruiterEmail, dayMark, she
 }
 
 // Manager confirmation request — sent after recruiter fills the sheet (Part 2)
-// Manager must reply "Done" to mark the milestone fully complete.
-async function sendManagerConfirmationRequest(employee, managerEmail, dayMark) {
+// Manager must reply "Confirmed"; recruiter is cc'd per HR spec Step 3.
+async function sendManagerConfirmationRequest(employee, managerEmail, dayMark, recruiterEmail, eventDateStr = '') {
   const { name, employeeId } = employee;
   const co = esc(process.env.COMPANY_NAME || '');
-  const monthTab = dayMark === 30 ? 'Tracking - Month -1' : dayMark === 60 ? 'Tracking - Month -2' : 'Tracking - Month -3';
   const sheetUrl = employee.projectIntroSheetId
     ? `https://docs.google.com/spreadsheets/d/${employee.projectIntroSheetId}`
     : null;
-  const sheetSection = sheetUrl
-    ? `<p style="margin:16px 0;"><a href="${sheetUrl}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;">Open Tracking Sheet — ${esc(monthTab)}</a></p>`
-    : '';
+  const sheetLinkText = sheetUrl ? ` (Sheet Link: ${sheetUrl})` : '';
+  const to = [managerEmail, recruiterEmail].filter(Boolean).join(', ');
+  if (!to) return;
   return sendEmail({
-    to: managerEmail,
+    to,
     subject: `Action Required — Confirm ${dayMark}-Day Review for ${esc(name)} (${esc(employeeId)})`,
     html: `
-      <p>Hi,</p>
-      <div style="margin:16px 0;padding:12px 16px;background:#fff8e1;border-left:4px solid #ffa000;border-radius:2px;">
-        <p style="margin:0 0 4px;font-weight:bold;color:#333;">What this email is about</p>
-        <p style="margin:0;color:#555;">The recruiter has filled in their section of the <strong>${dayMark}-day review tracking sheet</strong> (tab: <strong>${esc(monthTab)}</strong>) for <strong>${esc(name)}</strong> (ID: ${esc(employeeId)}). The final step is for you (the reporting manager) to confirm that the ${dayMark}-day review call was actually conducted. Your reply is what closes this milestone in the onboarding checklist.</p>
-      </div>
-      <p>You can review what the recruiter filled in the tracking sheet:</p>
-      ${sheetSection}
-      <p style="padding:10px 16px;background:#fffde7;border-left:4px solid #ffa000;">
-        <strong>Reply to this email with "Done"</strong> once you have confirmed the ${dayMark}-day review call was completed.
-      </p>
+      <p>Dear Manager,</p>
+      <p>As per the HR guidelines, you have completed ${dayMark}-day review${eventDateStr ? ` on <strong>${esc(eventDateStr)}</strong>` : ''}, and the review form${sheetLinkText} has been duly filled in.</p>
+      <p>Kindly reply to this mail with the text <strong>"Confirmed"</strong> to mark this activity as complete.</p>
       <p>Regards,<br/>${co} HR</p>
+    `,
+  });
+}
+
+// Step 4 (HR spec): sent to recruiter `reviewSummaryShareDelayDays` after the review
+// call, asking them to confirm they've shared the review summary with the joinee.
+// Requires "Confirmed" + a screenshot attachment to close the milestone.
+async function sendReviewSummaryShareReminder(employee, dayMark, eventDateStr) {
+  const { name, employeeId } = employee;
+  const recruiterEmail = (employee.contacts || {}).recruiterEmail;
+  if (!recruiterEmail) return;
+  return sendEmail({
+    to: recruiterEmail,
+    subject: `${dayMark}-Day Review Summary — Review Call Screenshot Needed — ${esc(name)} (${esc(employeeId)})`,
+    html: `
+      <p>Dear Recruiter,</p>
+      <p>As per the HR guidelines, you have completed the ${dayMark}-day review${eventDateStr ? ` on <strong>${esc(eventDateStr)}</strong>` : ''}. Once the reporting manager confirms the review sheet, the review summary will be emailed to ${esc(name)} automatically, with you on cc.</p>
+      <p>Kindly reply to this email with <strong>"Confirmed"</strong> and attach a screenshot of the review call to mark the activity as complete.</p>
+      <p>Thank you,<br/>Niyukti</p>
+    `,
+  });
+}
+
+// Step 5 (HR spec): the 30/60/90-day review summary — written by the system from the review
+// tab (see reviewSummary.js) — sent to the joinee with the recruiter on cc once the manager
+// has confirmed the sheet.
+// The subject keeps "Review Summary" + "Did You Receive" so the joinee's "Confirmed" /
+// "Not Received" reply is classified and closes the milestone.
+async function sendReviewSummaryEmail(employee, dayMark, summaryText) {
+  const { name, employeeId } = employee;
+  const co = esc(process.env.COMPANY_NAME || 'Alethea');
+  const to = employee.officialEmail || employee.personalEmail;
+  if (!to) throw new Error('joinee has no email address');
+  const recruiterEmail = (employee.contacts || {}).recruiterEmail || undefined;
+  const summaryHtml = esc(summaryText).replace(/\r?\n/g, '<br/>');
+  return sendEmail({
+    to,
+    cc: recruiterEmail,
+    subject: `${dayMark}-Day Review Summary — Did You Receive It? (${esc(employeeId)})`,
+    html: `
+      <p>Dear ${esc(name)},</p>
+      <p>As per HR guidelines, your <strong>${dayMark}-day review</strong> has been completed. Here is the summary of your review:</p>
+      <div style="margin:16px 0;padding:12px 16px;background:#f5f7fa;border-left:4px solid #1a73e8;border-radius:2px;color:#333;">${summaryHtml}</div>
+      <p>Kindly reply to this email with <strong>"Confirmed"</strong> to acknowledge that you have received your review summary. If you have any trouble reading it, reply with <strong>"Not Received"</strong> and we will send it again.</p>
+      <p>Regards,<br/>${co} HR</p>
+    `,
+  });
+}
+
+
+// Nudge sent to the recruiter when the joinee replies "Not Received" but the
+// recruiter had already confirmed sharing — asks them to actually resend it.
+async function sendReviewSummaryEscalation(employee, dayMark) {
+  const { name, employeeId } = employee;
+  const recruiterEmail = (employee.contacts || {}).recruiterEmail;
+  if (!recruiterEmail) return;
+  return sendEmail({
+    to: recruiterEmail,
+    subject: `Action Required — Please Share the ${dayMark}-Day Review Summary with ${esc(name)}`,
+    html: `
+      <p>Hi,</p>
+      <p>The system could not email the ${dayMark}-day review summary to ${esc(name)} (${esc(employeeId)}) automatically. Please share the <strong>${dayMark === 30 ? 'Tracking - Month -1' : dayMark === 60 ? 'Tracking - Month -2' : 'Tracking - Month -3'}</strong> tab with them directly and reply to this email once done.</p>
+      <p>Regards,<br/>HR Automation</p>
     `,
   });
 }
@@ -1536,12 +1561,11 @@ module.exports = {
   sendITAssetRequest,
   sendAdminSeatAllocationRequest,
   send25DayCatchupEmail,
-  send30DayTechnicalReview,
+  send25DayCatchupSummary,
   sendBGVRequest,
   sendBGVInitiateRequest,
   sendBGVUploadRequest,
   sendHRInductionConfirmation,
-  sendPeriodicReviewReminder,
   sendPreProbationReminder,
   sendPhaseCompletionSummary,
   sendVerificationReport,
@@ -1552,10 +1576,17 @@ module.exports = {
   sendNoReplyEscalation,
   sendOnboardingCompletionReport,
   sendJoineeOnboardingComplete,
-  sendJoineeReviewNotification,
   sendDOJScreenshotRequest,
   sendDocumentCrossCheckAlert,
   sendDayBeforeReminder,
   sendRecruiterSheetReminder,
   sendManagerConfirmationRequest,
+  sendReviewSummaryShareReminder,
+  sendReviewSummaryEmail,
+  sendReviewSummaryEscalation,
+  sendRoomUnavailableAlert,
+  sendOnboardingSurveyForm,
+  sendOnboardingSurveyRecruiterNotice,
+  sendOnboardingSurveyReminder,
+  sendOnboardingSurveyResponseToRecruiter,
 };

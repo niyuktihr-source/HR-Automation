@@ -23,8 +23,6 @@ const {
   sendProjectIntroInvite,
   sendCatchupXLSEmail,
   send25DayCatchupEmail,
-  send30DayTechnicalReview,
-  sendPeriodicReviewReminder,
   sendReviewSummaryRequest,
   sendPreProbationReminder,
   sendPhaseCompletionSummary,
@@ -82,28 +80,9 @@ async function run() {
   await fire('6. Official Email Access Test → Joinee', () => sendOfficialEmailAccessTest(employee));
   await fire('11. HR Induction Details → Joinee + Recruiter + Manager', () => sendInductionCalendarInvite(employee));
   await fire('14. Project Intro Invite → Joinee + Manager + Recruiter', () => sendProjectIntroInvite(employee, 'https://docs.google.com/spreadsheets/d/example'));
-  await fire('16. Feedback Form + 25-Day Catchup Notice → Joinee', async () => {
-    const { sendEmail } = require('./emailSender');
-    const feedbackFormLink = process.env.EMPLOYEE_FEEDBACK_FORM_LINK;
-    const formSection = feedbackFormLink
-      ? `<p><a href="${feedbackFormLink}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;display:inline-block;">Employee Feedback Form</a></p>`
-      : `<p>The feedback form link will be shared by HR.</p>`;
-    await sendEmail({
-      to: employee.officialEmail || employee.personalEmail,
-      subject: `Employee Feedback Form — ${process.env.COMPANY_NAME}`,
-      html: `
-        <p>Dear ${employee.name},</p>
-        <p>You've been with us for 25 days! Please take a moment to fill in the employee feedback form:</p>
-        ${formSection}
-        <p>You also have a <strong>25-Day Catchup Call</strong> scheduled on <strong>26 Jul 2026 at 11:00 AM IST</strong> with your HR/Recruiter. Please check your calendar for the invite.</p>
-        <p>Regards,<br/>HR Team, ${process.env.COMPANY_NAME}</p>
-      `,
-    });
-  });
 
   // ── Emails to Manager ───────────────────────────────────────────────────────
   await fire('7. Asset & Seat Allocation Request → Manager', () => sendAssetAllocationRequest(employee, MANAGER));
-  await fire('18. 30-Day Project Review → Manager + Joinee', () => send30DayTechnicalReview(employee));
 
   // ── Emails to IT ────────────────────────────────────────────────────────────
   await fire('8. IT Asset Request → IT', () => sendITAssetRequest(employee, IT, { officeLocation: 'Bangalore', itPersonName: 'King Demon' }));
@@ -118,8 +97,6 @@ async function run() {
   }));
   await fire('12. HR Induction Confirmation Request → Recruiter', () => sendHRInductionConfirmation(employee, RECRUITER));
   await fire('17. 25-Day Catchup Notification → HR + Recruiter', () => send25DayCatchupEmail(employee));
-  await fire('19. 60-Day Review Reminder → Recruiter + Manager', () => sendPeriodicReviewReminder(employee, RECRUITER, MANAGER, 60));
-  await fire('20. 90-Day Review Reminder → Recruiter + Manager', () => sendPeriodicReviewReminder(employee, RECRUITER, MANAGER, 90));
   await fire('21. Review Summary Request (60-Day) → Recruiter + Manager', () => sendReviewSummaryRequest(employee, 60));
   await fire('21. Review Summary Request (90-Day) → Recruiter + Manager', () => sendReviewSummaryRequest(employee, 90));
 

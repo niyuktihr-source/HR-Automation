@@ -5,7 +5,7 @@ const path = require('path');
 const fs   = require('fs');
 const { google } = require('googleapis');
 const { decrypt } = require('./encryption');
-const { sendPeriodicReviewReminder, sendPreProbationReminder } = require('./emailSender');
+const { sendPreProbationReminder } = require('./emailSender');
 const { mark60DayDone, mark90DayDone, markPreprobationDone } = require('./statusTracker');
 const { createReviewEvent } = require('./calendarService');
 
@@ -41,8 +41,6 @@ async function run() {
   console.log(`\n[1] Firing 60-day review for ${employee.name}...`);
   await createReviewEvent(auth, employee, 60).catch(e => console.warn('  60-day calendar failed:', e.message));
   console.log('  ✓ 60-day calendar event created');
-  await sendPeriodicReviewReminder(employee, recruiterEmail, managerEmail, 60).catch(e => console.warn('  60-day email failed:', e.message));
-  console.log('  ✓ 60-day review emails sent (recruiter/manager + joinee)');
   await mark60DayDone(auth, employee);
   console.log('  ✓ Sheet: 60-day review completed → Done');
 
@@ -50,8 +48,6 @@ async function run() {
   console.log(`\n[2] Firing 90-day review for ${employee.name}...`);
   await createReviewEvent(auth, employee, 90).catch(e => console.warn('  90-day calendar failed:', e.message));
   console.log('  ✓ 90-day calendar event created');
-  await sendPeriodicReviewReminder(employee, recruiterEmail, managerEmail, 90).catch(e => console.warn('  90-day email failed:', e.message));
-  console.log('  ✓ 90-day review emails sent (recruiter/manager + joinee)');
   await mark90DayDone(auth, employee);
   console.log('  ✓ Sheet: 90-day review completed → Done');
 

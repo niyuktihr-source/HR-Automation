@@ -13,7 +13,6 @@ const {
   sendITAssetRequest,
   sendBGVRequest,
   sendHRInductionConfirmation,
-  sendPeriodicReviewReminder,
   sendPreProbationReminder,
   sendPhaseCompletionSummary,
   sendVerificationReport,
@@ -56,28 +55,26 @@ const employee = {
 
 // Each entry: [label, async fn]
 const tests = [
-  ['1/19  sendPreOnboardingForm',         () => sendPreOnboardingForm(employee)],
-  ['2/19  sendDocumentRejection',         () => sendDocumentRejection(employee, 'Aadhaar Card', 'Document is blurry and Aadhaar number is not visible')],
-  ['3/19  sendNoResponseAlert',           () => sendNoResponseAlert(employee, testEmail)],
-  ['4/19  sendOfficialEmailCreationRequest', () => sendOfficialEmailCreationRequest(employee)],
-  ['5/19  sendAssetAllocationRequest',    () => sendAssetAllocationRequest(employee, testEmail)],
-  ['6/19  sendITAssetRequest',            () => sendITAssetRequest(employee, testEmail, { assetType: 'MacBook Pro', officeLocation: 'Bangalore HQ' })],
-  ['7/19  sendBGVRequest',                () => sendBGVRequest(employee, testEmail)],
-  ['8/19  sendHRInductionConfirmation',   () => sendHRInductionConfirmation(employee, testEmail)],
-  ['9/19  sendReviewSummaryRequest(30)',   () => sendReviewSummaryRequest(employee, 30)],
-  ['10/19 sendPeriodicReviewReminder(60)',() => sendPeriodicReviewReminder(employee, testEmail, testEmail, 60)],
-  ['11/19 sendPeriodicReviewReminder(90)',() => sendPeriodicReviewReminder(employee, testEmail, testEmail, 90)],
-  ['12/19 sendPreProbationReminder',      () => sendPreProbationReminder(employee, testEmail)],
-  ['13/19 sendPhaseCompletionSummary',    () => sendPhaseCompletionSummary(employee, 'Phase 3 — Day of Joining', ['HR induction done', 'IT assets allocated', 'Project intro meeting done'])],
-  ['14/19 sendVerificationReport',        () => sendVerificationReport(employee, {
+  ['1/17 sendPreOnboardingForm',         () => sendPreOnboardingForm(employee)],
+  ['2/17 sendDocumentRejection',         () => sendDocumentRejection(employee, 'Aadhaar Card', 'Document is blurry and Aadhaar number is not visible')],
+  ['3/17 sendNoResponseAlert',           () => sendNoResponseAlert(employee, testEmail)],
+  ['4/17 sendOfficialEmailCreationRequest', () => sendOfficialEmailCreationRequest(employee)],
+  ['5/17 sendAssetAllocationRequest',    () => sendAssetAllocationRequest(employee, testEmail)],
+  ['6/17 sendITAssetRequest',            () => sendITAssetRequest(employee, testEmail, { assetType: 'MacBook Pro', officeLocation: 'Bangalore HQ' })],
+  ['7/17 sendBGVRequest',                () => sendBGVRequest(employee, testEmail)],
+  ['8/17 sendHRInductionConfirmation',   () => sendHRInductionConfirmation(employee, testEmail)],
+  ['9/17 sendReviewSummaryRequest(30)',   () => sendReviewSummaryRequest(employee, 30)],
+  ['10/17sendPreProbationReminder',      () => sendPreProbationReminder(employee, testEmail)],
+  ['11/17sendPhaseCompletionSummary',    () => sendPhaseCompletionSummary(employee, 'Phase 3 — Day of Joining', ['HR induction done', 'IT assets allocated', 'Project intro meeting done'])],
+  ['12/17sendVerificationReport',        () => sendVerificationReport(employee, {
       aadhaar: { valid: true,  summary: 'Aadhaar card is clear and all fields visible' },
       pan:     { valid: false, summary: 'PAN number not visible' },
     })],
-  ['15/19 sendInductionCalendarInvite',   () => sendInductionCalendarInvite(employee)],
-  ['16/19 sendProjectIntroInvite',        () => sendProjectIntroInvite(employee)],
-  ['17/19 sendCatchupXLSEmail',           () => sendCatchupXLSEmail(employee)],
-  ['18/19 sendReviewSummaryRequest(30)',  () => sendReviewSummaryRequest(employee, 30)],
-  ['19/19 sendNoReplyEscalation',         () => sendNoReplyEscalation(employee, 'IT Team', process.env.IT_EMAIL || testEmail)],
+  ['13/17sendInductionCalendarInvite',   () => sendInductionCalendarInvite(employee)],
+  ['14/17sendProjectIntroInvite',        () => sendProjectIntroInvite(employee)],
+  ['15/17sendCatchupXLSEmail',           () => sendCatchupXLSEmail(employee)],
+  ['16/17sendReviewSummaryRequest(30)',  () => sendReviewSummaryRequest(employee, 30)],
+  ['17/17sendNoReplyEscalation',         () => sendNoReplyEscalation(employee, 'IT Team', process.env.IT_EMAIL || testEmail)],
 ];
 
 function sleep(ms) {

@@ -62,5 +62,5 @@ function createEmployeeFeedbackForm() {
   Logger.log('📝 Edit URL:      ' + form.getEditUrl());
   Logger.log('📋 Form ID:       ' + form.getId());
   Logger.log('');
-  Logger.log('→ Copy the Published URL into your .env as EMPLOYEE_FEEDBACK_FORM_LINK');
+  Logger.log('→ Copy the Form ID into your .env as ONBOARDING_SURVEY_TEMPLATE_FORM_ID (each joinee gets their own copy on day 23)');
 }

@@ -21,7 +21,16 @@
 //  Row 15: Pre-probation verification completed
 
 const { google } = require('googleapis');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 const config = require('./config');
+
+// Lazy — only instantiated when GEMINI_API_KEY is present, so module load never crashes
+let _genAI = null;
+function getGenAI() {
+  if (!process.env.GEMINI_API_KEY) return null;
+  if (!_genAI) _genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+  return _genAI;
+}
 
 // Retry async Google API calls on transient errors (429, 5xx, network)
 async function apiWithRetry(fn, label, maxAttempts = 3) {
@@ -499,6 +508,27 @@ async function renameStatusSheet(auth, employee, aadhaarName) {
   }
 }
 
+// ─── 30/60/90-day review — verify the tracking tab is genuinely filled ─────
+// Checks BOTH the recruiter section (B14:B16, "Filled by Recruiter") and the
+// manager/quality rating rows (B7:C11) before the milestone is allowed to close —
+// matches HR's Step 6 requirement that "Tab 1 should not be empty."
+async function isReviewSheetFullyFilled(auth, spreadsheetId, monthTab) {
+  if (!spreadsheetId) return false;
+  try {
+    const sheets = google.sheets({ version: 'v4', auth });
+    const [recruiterRes, managerRes] = await Promise.all([
+      apiWithRetry(() => sheets.spreadsheets.values.get({ spreadsheetId, range: `'${monthTab}'!B14:B16` }), 'isReviewSheetFullyFilled:recruiter'),
+      apiWithRetry(() => sheets.spreadsheets.values.get({ spreadsheetId, range: `'${monthTab}'!B7:C11` }), 'isReviewSheetFullyFilled:manager'),
+    ]);
+    const recruiterFilled = (recruiterRes.data.values || []).some(r => r && r[0] && String(r[0]).trim().length > 0);
+    const managerFilled = (managerRes.data.values || []).some(row => (row || []).some(cell => cell && String(cell).trim().length > 0));
+    return recruiterFilled && managerFilled;
+  } catch (err) {
+    console.warn(`[Status] isReviewSheetFullyFilled failed for ${spreadsheetId} (${monthTab}): ${err.message}`);
+    return false;
+  }
+}
+
 module.exports = {
   STATUS,
   MILESTONES,
@@ -529,6 +559,11 @@ module.exports = {
   createEmployeeInfoSheet,
   getOrCreateCatchupSheet,
   createCatchupSheet: getOrCreateCatchupSheet,
+  isCatchup25SheetFilled,
+  readCatchup25QAPairs,
+  readCatchup25RecruiterSummary,
+  summarizeCatchup25Notes,
+  isReviewSheetFullyFilled,
 };
 
 // ─── Project Intro Sheet ───────────────────────────────────────────────────────
@@ -1629,6 +1664,93 @@ async function getOrCreateCatchupSheet(auth, employee) {
   } catch (err) {
     console.error(`[Status] getOrCreateCatchupSheet failed for ${name}: ${err.message}`);
     return null;
+  }
+}
+
+// ─── 25-Day Catchup — Q&A tabs on the employee's catchup sheet ─────────────
+// The catchup template has one "Followup Call - Details" tab (candidate info +
+// a free-text "Recruiter Summary" cell) and two guideline-question tabs
+// ("Inhouse Projects-Guideline Ques" / "Client Deployment - Guideline Q") —
+// only one of which the recruiter fills in, depending on where the joinee works.
+// Column A holds the question, column B holds the joinee's answer (typed in by
+// the recruiter during/after the call).
+const CATCHUP25_GUIDELINE_TABS = [
+  { tab: 'Inhouse Projects-Guideline Ques', firstRow: 2, lastRow: 17 },
+  { tab: 'Client Deployment - Guideline Q', firstRow: 1, lastRow: 10 },
+];
+const CATCHUP25_SUMMARY_TAB = 'Followup Call - Details';
+const CATCHUP25_SUMMARY_CELL = `'${CATCHUP25_SUMMARY_TAB}'!B2`;
+
+// Returns { tab, qaPairs: [{question, answer}] } for whichever guideline tab has
+// answers filled in, or null if neither tab has anything yet.
+async function readCatchup25QAPairs(auth, spreadsheetId) {
+  const sheets = google.sheets({ version: 'v4', auth });
+  for (const { tab, firstRow, lastRow } of CATCHUP25_GUIDELINE_TABS) {
+    const res = await apiWithRetry(() => sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${tab}'!A${firstRow}:B${lastRow}`,
+    }), 'readCatchup25QAPairs').catch(() => ({ data: {} }));
+    const rows = res.data.values || [];
+    const qaPairs = rows
+      .map(r => ({ question: (r[0] || '').trim(), answer: (r[1] || '').trim() }))
+      .filter(r => r.question && r.answer);
+    if (qaPairs.length > 0) {
+      return { tab, qaPairs };
+    }
+  }
+  return null;
+}
+
+// Returns the free-text "Recruiter Summary" cell content, or '' if empty.
+async function readCatchup25RecruiterSummary(auth, spreadsheetId) {
+  const sheets = google.sheets({ version: 'v4', auth });
+  const res = await apiWithRetry(() => sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: CATCHUP25_SUMMARY_CELL,
+  }), 'readCatchup25RecruiterSummary').catch(() => ({ data: {} }));
+  const rows = res.data.values || [];
+  return (rows[0] && rows[0][0] || '').trim();
+}
+
+// Sheet counts as "filled" once either guideline tab has answers, or the
+// recruiter has typed a free-text summary.
+async function isCatchup25SheetFilled(auth, employee) {
+  if (!employee.catchupSheetId) return false;
+  const [qa, summary] = await Promise.all([
+    readCatchup25QAPairs(auth, employee.catchupSheetId).catch(() => null),
+    readCatchup25RecruiterSummary(auth, employee.catchupSheetId).catch(() => ''),
+  ]);
+  return !!(qa || summary);
+}
+
+// Summarizes the joinee's Q&A answers (+ any free-text recruiter summary) into
+// manager-facing prose via Gemini. Returns a plain-text summary, or a basic
+// fallback bullet list if GEMINI_API_KEY isn't configured.
+async function summarizeCatchup25Notes(employee, qaPairs, recruiterSummary) {
+  const bulletFallback = [
+    ...qaPairs.map(p => `• ${p.question} — ${p.answer}`),
+    recruiterSummary ? `• Recruiter notes: ${recruiterSummary}` : null,
+  ].filter(Boolean).join('\n');
+
+  const genAI = getGenAI();
+  if (!genAI) return bulletFallback;
+
+  const prompt = `You are an HR assistant. Below are a new joinee's answers from their 25-day catchup call, in question -> answer format, plus optional free-text recruiter notes. Write a short, professional prose summary (3-6 sentences) for the joinee's manager, covering how onboarding is going, any challenges/blockers raised, and anything requiring the manager's attention. Do not repeat the raw Q&A verbatim — synthesize it. Do not include a greeting or sign-off, just the summary body.
+
+Joinee: ${employee.name}
+
+Q&A:
+${qaPairs.map(p => `Q: ${p.question}\nA: ${p.answer}`).join('\n\n')}
+${recruiterSummary ? `\nRecruiter notes: ${recruiterSummary}` : ''}`;
+
+  try {
+    const model = genAI.getGenerativeModel({ model: config.geminiModel });
+    const response = await model.generateContent(prompt);
+    const text = response.response.text().trim();
+    return text || bulletFallback;
+  } catch (err) {
+    console.warn(`[Status] Gemini catchup summary failed for ${employee.name}: ${err.message} — falling back to raw Q&A`);
+    return bulletFallback;
   }
 }
 

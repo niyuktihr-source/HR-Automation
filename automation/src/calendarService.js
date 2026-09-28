@@ -4,6 +4,7 @@
 const { google } = require('googleapis');
 const config = require('./config');
 const crypto = require('crypto');
+const { attachRoom, roomDeclined } = require('./roomBooking');
 
 // ─── Internal helpers ──────────────────────────────────────────────────────────
 
@@ -14,13 +15,8 @@ function addDays(date, days) {
   return d;
 }
 
-// Advance to next Monday if date falls on a weekend
-function ensureWorkingDay(date) {
-  const d = new Date(date);
-  if (d.getDay() === 6) d.setDate(d.getDate() + 2); // Saturday → Monday
-  if (d.getDay() === 0) d.setDate(d.getDate() + 1); // Sunday  → Monday
-  return d;
-}
+// Working days = Mon–Fri excluding national holidays — see workingDays.js
+const { ensureWorkingDay } = require('./workingDays');
 
 // If the intended event date is in the past (cron fired late due to restart/OAuth expiry),
 // bump to the next working day from today so the invite is still actionable.
@@ -149,11 +145,15 @@ function persistCalendarEvent(employee, actionKey, event) {
   if (employee._saveState) employee._saveState();
 }
 
+// event.bookRoom (optional): a label such as 'HR Induction' — when set, a free room that
+// seats everyone is added to a newly created event; if none can be booked, HR and the
+// recruiter are alerted. Existing events are reused as-is and never re-booked.
 async function insertCalendarEvent(calendar, employee, actionKey, event) {
   const automationKey = calendarAutomationKey(employee, actionKey);
   const eventId = deterministicEventId(automationKey);
+  const { bookRoom, ...eventFields } = event;
   const resource = {
-    ...event,
+    ...eventFields,
     id: eventId,
     conferenceData: event.conferenceData || {
       createRequest: {
@@ -192,6 +192,14 @@ async function insertCalendarEvent(calendar, employee, actionKey, event) {
     return existing;
   }
 
+  let room = null;
+  let roomProblem = null;
+  if (bookRoom) {
+    const result = await attachRoom(calendar, resource);
+    if (result && result.email) room = result;
+    else if (result && result.unavailable) roomProblem = result.unavailable;
+  }
+
   try {
     const created = await calendar.events.insert({
       calendarId: 'primary',
@@ -201,6 +209,21 @@ async function insertCalendarEvent(calendar, employee, actionKey, event) {
     });
 
     persistCalendarEvent(employee, actionKey, created.data);
+
+    if (room) {
+      if (await roomDeclined(calendar, eventId, room.email)) {
+        roomProblem = `${room.name} declined the booking`;
+      } else {
+        console.log(`[Rooms] ${room.name} booked for ${bookRoom} — ${employee.name}`);
+      }
+    }
+    if (roomProblem) {
+      console.warn(`[Rooms] No room for ${bookRoom} — ${employee.name}: ${roomProblem}`);
+      const { sendRoomUnavailableAlert } = require('./emailSender');
+      await sendRoomUnavailableAlert(employee, bookRoom, resource.start.dateTime, roomProblem, created.data.htmlLink).catch(err =>
+        console.warn(`[Rooms] Room-unavailable alert failed for ${employee.name}: ${err.message}`)
+      );
+    }
     return created;
   } catch (err) {
     // Another process may have won the insert race using the same stable ID.
@@ -265,6 +288,7 @@ async function createHRInductionEvent(auth, employee) {
       guestsCanModify: false,
       guestsCanInviteOthers: false,
       guestsCanSeeOtherGuests: true,
+      bookRoom: 'HR Induction',
     };
 
     const res = await insertCalendarEvent(calendar, employee, actionKey, event);
@@ -364,21 +388,20 @@ async function create25DayCatchupEvent(auth, employee) {
     }
 
     const attendees = [
-      employee.officialEmail || employee.personalEmail,
-      employee.contacts && employee.contacts.recruiterEmail,
-      employee.contacts && employee.contacts.managerEmail,
-    ]
-      .filter(Boolean)
-      .map(email => ({ email }));
+      (employee.officialEmail || employee.personalEmail) && { email: employee.officialEmail || employee.personalEmail },
+      employee.contacts && employee.contacts.recruiterEmail && { email: employee.contacts.recruiterEmail },
+      employee.contacts && employee.contacts.managerEmail && { email: employee.contacts.managerEmail, optional: true },
+    ].filter(Boolean);
 
     const cfg = config.calendarEvents.catchup25day;
     const endMins = cfg.minute + cfg.durationMins;
     const summary = wasRescheduled
-      ? `25-Day Catchup ⚠️ (Rescheduled) — ${employee.name}`
-      : `25-Day Catchup — ${employee.name}`;
+      ? `HR Catchup ⚠️ (Rescheduled)`
+      : `HR Catchup`;
+    const letterBody = `Dear ${employee.name},\n\nHope you're settling in well! We'd love to have a quick catch-up with you to see how things are going, hear about your experience so far, and check if there's anything you need from us. Looking forward to connecting.\n\nWarm regards,\nHR Team`;
     const description = wasRescheduled
-      ? `25-day onboarding catchup call for ${employee.name} (${employee.employeeId}).\n\n⚠️ This meeting was originally scheduled for ${originalDate.toDateString()} and has been rescheduled.\n\nAgenda:\n• Onboarding experience so far\n• Any challenges or blockers\n• Role clarity check\n• Initial feedback from the team`
-      : `25-day onboarding catchup call for ${employee.name} (${employee.employeeId}).\n\nAgenda:\n• Onboarding experience so far\n• Any challenges or blockers\n• Role clarity check\n• Initial feedback from the team`;
+      ? `⚠️ This meeting was originally scheduled for ${originalDate.toDateString()} and has been rescheduled.\n\n${letterBody}`
+      : letterBody;
     const event = {
       summary,
       description,
@@ -387,6 +410,7 @@ async function create25DayCatchupEvent(auth, employee) {
       attendees,
       guestsCanModify: false,
       guestsCanInviteOthers: false,
+      bookRoom: '25-Day Catchup',
     };
 
     const res = await insertCalendarEvent(calendar, employee, actionKey, event);
@@ -423,16 +447,19 @@ async function create30DayCatchupEvent(auth, employee) {
       console.warn(`[Calendar] 30-day catchup for ${employee.name} was in the past (${originalDate.toDateString()}) — rescheduling invite to ${eventDate.toDateString()}`);
     }
 
+    // HR spec: invite recruiter + manager only — the joinee is not on this call.
     const attendees = [
-      employee.officialEmail || employee.personalEmail,
       employee.contacts && employee.contacts.recruiterEmail,
       employee.contacts && employee.contacts.managerEmail,
     ]
       .filter(Boolean)
       .map(email => ({ email }));
 
-    const catchupLink = employee.catchupSheetUrl || (employee.catchupSheetId ? `https://docs.google.com/spreadsheets/d/${employee.catchupSheetId}` : '');
-    const sheetSection = catchupLink ? `\n\nCatchup Sheet: ${catchupLink}` : '';
+    const sheetLink = employee.projectIntroSheetId
+      ? `https://docs.google.com/spreadsheets/d/${employee.projectIntroSheetId}`
+      : '';
+    const managerName = (employee.contacts && employee.contacts.managerName) || 'Manager';
+    const letterBody = `Hi ${managerName},\n\nAs part of the probation process, you are responsible for training ${employee.name} in your team. The monthly tasks and training plan were updated at the time of their joining.\nTo ensure that ${employee.name}'s training progress is well-documented and meets ISO requirements, please complete the progress sheet before our upcoming review meeting.\nDuring this meeting, we will briefly discuss the progress, and after the discussion, the summary sheet will be shared with you, the new Joinee, and the HR Manager. Your support in this process is greatly appreciated. Let me know if you have any questions.\n\nAL_DI_HR_019 Project Introduction — New Joinee (${employee.employeeId}) Sheet${sheetLink ? `: ${sheetLink}` : ' link not yet available'}`;
 
     const cfg = config.calendarEvents.catchup30day;
     const endMins = cfg.minute + cfg.durationMins;
@@ -440,8 +467,8 @@ async function create30DayCatchupEvent(auth, employee) {
       ? `30-Day Catchup ⚠️ (Rescheduled) — ${employee.name}`
       : `30-Day Catchup — ${employee.name}`;
     const description = wasRescheduled
-      ? `30-day catchup call for ${employee.name} (${employee.employeeId}).\n\n⚠️ This meeting was originally scheduled for ${originalDate.toDateString()} and has been rescheduled.\n\nCovers onboarding experience, role clarity, challenges, and initial performance feedback.${sheetSection}`
-      : `30-day catchup call for ${employee.name} (${employee.employeeId}). Covers onboarding experience, role clarity, challenges, and initial performance feedback.${sheetSection}`;
+      ? `⚠️ This meeting was originally scheduled for ${originalDate.toDateString()} and has been rescheduled.\n\n${letterBody}`
+      : letterBody;
     const event = {
       summary,
       description,
@@ -450,11 +477,12 @@ async function create30DayCatchupEvent(auth, employee) {
       attendees,
       guestsCanModify: false,
       guestsCanInviteOthers: false,
+      bookRoom: '30-Day Review',
     };
 
     const res = await insertCalendarEvent(calendar, employee, actionKey, event);
     console.log(`[Calendar] 30-Day Catchup event created for ${employee.name}: ${res.data.htmlLink}`);
-    return res.data.htmlLink;
+    return { htmlLink: res.data.htmlLink, eventDate };
   } catch (err) {
     console.error('[Calendar] error: create30DayCatchupEvent failed:', err.message);
     return null;
@@ -487,13 +515,19 @@ async function createReviewEvent(auth, employee, dayMark) {
       console.warn(`[Calendar] ${dayMark}-day review for ${employee.name} was in the past (${originalDate.toDateString()}) — rescheduling invite to ${eventDate.toDateString()}`);
     }
 
+    // HR spec: invite recruiter + manager only — the joinee is not on this call.
     const attendees = [
-      employee.officialEmail || employee.personalEmail,
       employee.contacts && employee.contacts.recruiterEmail,
       employee.contacts && employee.contacts.managerEmail,
     ]
       .filter(Boolean)
       .map(email => ({ email }));
+
+    const sheetLink = employee.projectIntroSheetId
+      ? `https://docs.google.com/spreadsheets/d/${employee.projectIntroSheetId}`
+      : '';
+    const managerName = (employee.contacts && employee.contacts.managerName) || 'Manager';
+    const letterBody = `Hi ${managerName},\n\nAs part of the probation process, you are responsible for training ${employee.name} in your team. The monthly tasks and training plan were updated at the time of their joining.\nTo ensure that ${employee.name}'s training progress is well-documented and meets ISO requirements, please complete the progress sheet before our upcoming review meeting.\nDuring this meeting, we will briefly discuss the progress, and after the discussion, the summary sheet will be shared with you, the new Joinee, and the HR Manager. Your support in this process is greatly appreciated. Let me know if you have any questions.\n\nAL_DI_HR_019 Project Introduction — New Joinee (${employee.employeeId}) Sheet${sheetLink ? `: ${sheetLink}` : ' link not yet available'}`;
 
     const cfg = config.calendarEvents.reviewMeeting;
     const endMins = cfg.minute + cfg.durationMins;
@@ -501,8 +535,8 @@ async function createReviewEvent(auth, employee, dayMark) {
       ? `${dayMark}-Day Review ⚠️ (Rescheduled) — ${employee.name}`
       : `${dayMark}-Day Review — ${employee.name}`;
     const description = wasRescheduled
-      ? `${dayMark}-day performance review for ${employee.name} (${employee.employeeId}).\n\n⚠️ Originally scheduled for ${originalDate.toDateString()} — rescheduled due to a system restart.\n\nCovers performance assessment, key achievements, areas of improvement, and next goals.`
-      : `${dayMark}-day performance review for ${employee.name} (${employee.employeeId}). Covers performance assessment, key achievements, areas of improvement, and next goals.`;
+      ? `⚠️ Originally scheduled for ${originalDate.toDateString()} — rescheduled due to a system restart.\n\n${letterBody}`
+      : letterBody;
     const event = {
       summary,
       description,
@@ -511,11 +545,12 @@ async function createReviewEvent(auth, employee, dayMark) {
       attendees,
       guestsCanModify: false,
       guestsCanInviteOthers: false,
+      bookRoom: `${dayMark}-Day Review`,
     };
 
     const res = await insertCalendarEvent(calendar, employee, actionKey, event);
     console.log(`[Calendar] ${dayMark}-Day Review event created for ${employee.name}: ${res.data.htmlLink}`);
-    return res.data.htmlLink;
+    return { htmlLink: res.data.htmlLink, eventDate };
   } catch (err) {
     console.error(`[Calendar] error: createReviewEvent (${dayMark}-day) failed:`, err.message);
     return null;

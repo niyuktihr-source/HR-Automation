@@ -45,10 +45,10 @@ const MILESTONE_TASKS = [
   't34',  // HR induction screenshot confirmed
   't37',  // Project intro screenshot confirmed
   't42',  // DOJ phase complete
-  't63',  // Day 25 catchup email sent
-  't43',  // 30-day catchup transcribed
-  't46',  // 60-day review done
-  't49',  // 90-day review done
+  't65',  // Day 25 catchup fully complete (summary sent to manager)
+  't45',  // 30-day review fully complete (joinee confirmed receipt)
+  't48',  // 60-day review fully complete (joinee confirmed receipt)
+  't51',  // 90-day review fully complete (joinee confirmed receipt)
   't52',  // Pre-probation verification completed
 ];
 
@@ -130,6 +130,14 @@ function milestoneStatus(employee, milestoneIdx) {
   if (taskKey === 't34' && isTaskDone(employee.checklist, 't27')) return 'inProgress';
   // Project Intro (t37) — yellow if invite was sent (t29 marked) but screenshot not yet uploaded
   if (taskKey === 't37' && isTaskDone(employee.checklist, 't29')) return 'inProgress';
+  // Day 25 Catchup (t65) — yellow once the reminder email was sent (t63) but the
+  // tracking sheet hasn't been filled / summary hasn't gone out yet (t65)
+  if (taskKey === 't65' && isTaskDone(employee.checklist, 't63')) return 'inProgress';
+  // Day 30/60/90 Review (t45/t48/t51) — yellow once the recruiter section is filled
+  // (t43/t46/t49) but the joinee hasn't confirmed receipt of the summary yet
+  if (taskKey === 't45' && isTaskDone(employee.checklist, 't43')) return 'inProgress';
+  if (taskKey === 't48' && isTaskDone(employee.checklist, 't46')) return 'inProgress';
+  if (taskKey === 't51' && isTaskDone(employee.checklist, 't49')) return 'inProgress';
 
   // t10 (re-upload reminder) — only relevant if actually triggered
   if (taskKey === 't10') {
@@ -151,10 +159,10 @@ function milestoneStatus(employee, milestoneIdx) {
     t34:  1,  // HR induction screenshot — expected on DOJ
     t37:  1,  // Project intro screenshot — expected on DOJ
     t42:  0,  // DOJ phase complete on DOJ
-    t63: 25,  // day 25 catchup
-    t43: 30,  // 30-day review
-    t46: 60,  // 60-day review
-    t49: 90,  // 90-day review
+    t65: 25,  // day 25 catchup
+    t45: 30,  // 30-day review
+    t48: 60,  // 60-day review
+    t51: 90,  // 90-day review
     t52: 90,  // pre-probation
   };
 

@@ -14,15 +14,12 @@ const { decrypt } = require('./encryption');
 const {
   sendPhaseCompletionSummary,
   send25DayCatchupEmail,
-  send30DayTechnicalReview,
-  sendPeriodicReviewReminder,
   sendPreProbationReminder,
   sendReviewSummaryRequest,
   sendAdminSeatAllocationRequest,
   sendHRInductionConfirmation,
   sendOnboardingCompletionReport,
   sendJoineeOnboardingComplete,
-  sendJoineeReviewNotification,
 } = require('./emailSender');
 const {
   mark25DayCatchupDone,
@@ -145,7 +142,6 @@ async function run() {
     await getOrCreateCatchupSheet(auth, employee).catch(e => console.warn('  Catchup sheet failed:', e.message));
     await create25DayCatchupEvent(auth, employee).catch(e => console.warn('  25-day calendar failed:', e.message));
     await send25DayCatchupEmail(employee, { meetLink: employee.meetLinks && employee.meetLinks['25day-catchup'] }).catch(e => console.warn('  25-day email failed:', e.message));
-    await sendJoineeReviewNotification(employee, 25, { meetLink: employee.meetLinks && employee.meetLinks['25day-catchup'] }).catch(e => console.warn('  25-day joinee email failed:', e.message));
     await mark25DayCatchupDone(auth, employee).catch(() => {});
     markDone('t63');
   } else {
@@ -153,33 +149,10 @@ async function run() {
     await mark25DayCatchupDone(auth, employee).catch(() => {});
   }
 
-  // ── Feedback form (t38) ────────────────────────────────────────────────────
-  if (!isTaskDone('t38')) {
-    console.log('\n[5] Firing: Employee feedback form email (t38)');
-    const { sendEmail } = require('./emailSender');
-    const feedbackFormLink = process.env.EMPLOYEE_FEEDBACK_FORM_LINK;
-    const name = employee.name;
-    const to   = employee.officialEmail || employee.personalEmail;
-    const formSection = feedbackFormLink
-      ? `<p><a href="${feedbackFormLink}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;">Employee Feedback Form</a></p>`
-      : `<p style="color:#e65100;">Feedback form link not configured.</p>`;
-    await sendEmail({
-      to,
-      subject: `Employee Feedback Form — ${process.env.COMPANY_NAME}`,
-      html: `<p>Dear ${name},</p><p>You have been with us for 25 days! Please take a moment to fill in the employee feedback form:</p>${formSection}<p>Regards,<br/>${process.env.COMPANY_NAME} HR</p>`,
-    }).catch(e => console.warn('  Feedback form email failed:', e.message));
-    markDone('t38');
-  } else {
-    console.log('\n[5] t38 already done — skipping');
-  }
-
   // ── 30-day catchup ─────────────────────────────────────────────────────────
   if (!isTaskDone('t43')) {
     console.log('\n[6] Firing: 30-day catchup (t43)');
-    await getOrCreateCatchupSheet(auth, employee).catch(e => console.warn('  Catchup sheet failed:', e.message));
     await create30DayCatchupEvent(auth, employee).catch(e => console.warn('  30-day calendar failed:', e.message));
-    await send30DayTechnicalReview(employee, { meetLink: employee.meetLinks && employee.meetLinks['30day-catchup'] }).catch(e => console.warn('  30-day email failed:', e.message));
-    await sendJoineeReviewNotification(employee, 30, { meetLink: employee.meetLinks && employee.meetLinks['30day-catchup'] }).catch(e => console.warn('  30-day joinee email failed:', e.message));
     await mark30DayDone(auth, employee).catch(() => {});
     markDone('t43');
   } else {
@@ -190,11 +163,8 @@ async function run() {
   // ── 60-day review ──────────────────────────────────────────────────────────
   if (!isTaskDone('t46')) {
     console.log('\n[7] Firing: 60-day review (t46/t47)');
-    await sendPeriodicReviewReminder(employee, contacts.recruiterEmail, contacts.managerEmail, 60)
-      .catch(e => console.warn('  60-day reminder failed:', e.message));
     await createReviewEvent(auth, employee, 60).catch(e => console.warn('  60-day calendar failed:', e.message));
     await sendReviewSummaryRequest(employee, 60, { meetLink: employee.meetLinks && employee.meetLinks['60day-review'] }).catch(e => console.warn('  60-day summary request failed:', e.message));
-    await sendJoineeReviewNotification(employee, 60, { meetLink: employee.meetLinks && employee.meetLinks['60day-review'] }).catch(e => console.warn('  60-day joinee email failed:', e.message));
     await mark60DayDone(auth, employee).catch(() => {});
     markDone('t46');
     markDone('t47');
@@ -205,11 +175,8 @@ async function run() {
   // ── 90-day review ──────────────────────────────────────────────────────────
   if (!isTaskDone('t49')) {
     console.log('\n[8] Firing: 90-day review (t49/t50)');
-    await sendPeriodicReviewReminder(employee, contacts.recruiterEmail, contacts.managerEmail, 90)
-      .catch(e => console.warn('  90-day reminder failed:', e.message));
     await createReviewEvent(auth, employee, 90).catch(e => console.warn('  90-day calendar failed:', e.message));
     await sendReviewSummaryRequest(employee, 90, { meetLink: employee.meetLinks && employee.meetLinks['90day-review'] }).catch(e => console.warn('  90-day summary request failed:', e.message));
-    await sendJoineeReviewNotification(employee, 90, { meetLink: employee.meetLinks && employee.meetLinks['90day-review'] }).catch(e => console.warn('  90-day joinee email failed:', e.message));
     await mark90DayDone(auth, employee).catch(() => {});
     markDone('t49');
     markDone('t50');

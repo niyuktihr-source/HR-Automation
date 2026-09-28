@@ -13,10 +13,11 @@ Standalone Node.js engine that automates the full employee onboarding lifecycle 
 - Creates AL_DI_HR_018 Employee Information Sheet (Personal Details + Education & Professional Detail tabs) auto-filled from extracted document data
 - Creates AL_DI_HR_019 Project Introduction Sheet with 5 tracking tabs; links the correct month tab in 30/60/90-day project review reminder emails
 - Schedules 30/60/90-day project review reminders and 5-month pre-probation alerts via cron
-- Sends onboarding survey + employee feedback form at day 25
+- On day 23, creates a per-joinee copy of "Employee Feedback Form: Onboarding Experience", shares it with the recruiter (editor), emails it to the joinee, reminds daily, and emails the recruiter the completed response as .xlsx
 - Shares project intro catchup sheet with new joiner
 - Creates calendar invites for HR induction, project intro, 25-day catchup, 30/60/90-day review calls
-- Sends 25-day feedback form email to new joinee — includes the scheduled catchup call date/time and a calendar invite link
+- Treats India's three national holidays (Republic Day, Independence Day, Gandhi Jayanti) like weekends — meetings, emails and reminders move to the next working day
+- Books the smallest free meeting room that fits everyone on the HR induction, 25-day catchup and 30/60/90-day review invites (`MEETING_ROOMS`); alerts HR + recruiter if none is free
 - Sends 25-day catchup notification email to HR + recruiter (not new joinee) with full employee details table
 - Parses email replies via Gmail Watch + Pub/Sub to advance the checklist automatically — with fallback matching by employee name, pending task state, and sender email
 - Persists all state locally (encrypted AES-256-GCM) so restarts never repeat completed steps
@@ -163,8 +164,7 @@ Five forms are used in the onboarding flow. Apps Script to create each is in `au
 | Pre-Onboarding Form (Fresher) | `createFresherPreonboardingForm.gs` | Before DOJ — welcome email | `PREONBOARDING_FORM_FRESHER_LINK` |
 | Pre-Onboarding Form (Experienced) | `createExperiencedPreonboardingForm.gs` | Before DOJ — welcome email | `PREONBOARDING_FORM_EXPERIENCED_LINK` |
 | Recruiter Form | `createRecruiterForm.gs` | HR/recruiter fills to register a new joinee | `RECRUITER_FORM_LINK` |
-| Onboarding Survey | — | Day 25 after DOJ | `ONBOARDING_SURVEY_LINK` |
-| Employee Feedback Form | `createEmployeeFeedbackForm.gs` | 30/60/90-day project review emails | `EMPLOYEE_FEEDBACK_FORM_LINK` |
+| Employee Feedback Form: Onboarding Experience | `createEmployeeFeedbackForm.gs` | Day 23 after DOJ — a copy per joinee, shared with the recruiter as editor | `ONBOARDING_SURVEY_TEMPLATE_FORM_ID` |
 
 To create a form: open [script.google.com](https://script.google.com) → New Project → paste the script → Run → copy the Published URL into `.env`.
 

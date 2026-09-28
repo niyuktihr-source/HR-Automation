@@ -26,6 +26,7 @@ const {
   send25DayCatchupEmail,
   sendDOJScreenshotRequest,
   sendDocumentCrossCheckAlert,
+  sendReviewSummaryEscalation,
 } = require('./emailSender');
 const {
   scheduleAllMilestones,
@@ -41,6 +42,7 @@ const {
   startDataRetentionCron,
   cancelAllJobs,
 } = require('./cronJobs');
+const { sendReviewSummaryToJoinee } = require('./reviewSummary');
 const { createHRInductionEvent, createProjectIntroEvent, create30DayCatchupEvent, createReviewEvent } = require('./calendarService');
 const webhookServer = require('./webhookServer');
 const { registerGmailWatch, downloadAttachment } = require('./gmailWatcher');
@@ -70,6 +72,7 @@ const {
   createProjectIntroSheet,
   createEmployeeInfoSheet,
   getOrCreateCatchupSheet,
+  isReviewSheetFullyFilled,
 } = require('./statusTracker');
 const { updateMasterDashboard } = require('./masterDashboard');
 
@@ -183,6 +186,8 @@ function snapshotEmployee(employee) {
     employeeInfoSheetId: employee.employeeInfoSheetId || null,
     catchupSheetId: employee.catchupSheetId || null,
     catchupSheetUrl: employee.catchupSheetUrl || null,
+    onboardingSurveyForm: employee.onboardingSurveyForm || null, // day-23 per-joinee form { formId, editUrl, responderUrl }
+    reviewSummarySentAt: employee.reviewSummarySentAt || {}, // { 30|60|90: ISO time the summary was emailed to the joinee }
     meetLinks: employee.meetLinks || {},
     verificationResults: employee.verificationResults || {},
     extractedData: employee.extractedData || {},
@@ -372,11 +377,18 @@ function buildDefaultChecklist() {
         t36: { label: 'General Admin confirms seat allocation', done: false },
         t37: { label: 'Project intro meeting attendance confirmed', done: false },
         t54: { label: 'Recruiter checks asset and seat allocation physically', done: false },
-        t38: { label: 'Employee feedback form sent on day 25', done: false },
         t39: { label: '30-day catchup call scheduled', done: false },
         t40: { label: 'Catchup XLS created, shared with recruiter, saved in joinee folder', done: false },
         t41: { label: '30/60/90-day project reviews scheduled with manager and recruiter', done: false },
         t42: { label: 'Checklist1 updated — DOJ phase complete', done: false },
+      },
+    },
+    // ── Phase 3a: 23 Days After DOJ — Onboarding Survey Form ─────────────────
+    phase3a: {
+      label: 'Phase 3a — 23rd Day Onboarding Survey',
+      tasks: {
+        t70: { label: 'Onboarding survey form created for joinee (recruiter has edit access), sent, recruiter notified', done: false },
+        t71: { label: 'Survey fully answered — response saved to joinee folder and .xlsx sent to recruiter', done: false },
       },
     },
     // ── Phase 3b: 25 Days After DOJ — Catchup Call ───────────────────────────
@@ -393,19 +405,22 @@ function buildDefaultChecklist() {
     phase4: {
       label: 'Phase 4 — 30 Days After DOJ',
       tasks: {
-        t43: { label: 'Catchup call transcribed and mailed to HR and manager', done: false },
-        t44: { label: 'Recruiter catchup XLS verified as filled', done: false },
+        t43: { label: 'Recruiter has filled the Tracking - Month -1 tab', done: false },
+        t44: { label: 'Manager confirms 30-day review sheet is filled and OK', done: false },
         t45: { label: '30-day milestone marked complete in Checklist1', done: false },
+        t73: { label: 'Recruiter confirms 30-day review call (with screenshot)', done: false },
+        t74: { label: 'Review summary emailed to joinee (cc recruiter) and joinee confirmed receipt', done: false },
       },
     },
     // ── Phase 5: 60 Days After DOJ ────────────────────────────────────────────
-    // From 60-day image — transcribe call; if didn't happen, mark pending + remind
     phase5: {
       label: 'Phase 5 — 60 Days After DOJ',
       tasks: {
-        t46: { label: 'Call between recruiter and manager transcribed and project intro sheet updated', done: false },
-        t47: { label: 'Call did not happen — reminder sent to reschedule; marked pending', done: false },
+        t46: { label: 'Recruiter has filled the Tracking - Month -2 tab', done: false },
+        t47: { label: 'Manager confirms 60-day review sheet is filled and OK', done: false },
         t48: { label: '60-day milestone marked complete in Checklist1', done: false },
+        t76: { label: 'Recruiter confirms 60-day review call (with screenshot)', done: false },
+        t77: { label: 'Review summary emailed to joinee (cc recruiter) and joinee confirmed receipt', done: false },
       },
     },
     // ── Phase 6: 90 Days After DOJ ────────────────────────────────────────────
@@ -413,9 +428,11 @@ function buildDefaultChecklist() {
     phase6: {
       label: 'Phase 6 — 90 Days After DOJ',
       tasks: {
-        t49: { label: 'Call between recruiter and manager transcribed and project intro sheet updated', done: false },
-        t50: { label: 'Call did not happen — reminder sent to reschedule; marked pending', done: false },
+        t49: { label: 'Recruiter has filled the Tracking - Month -3 tab', done: false },
+        t50: { label: 'Manager confirms 90-day review sheet is filled and OK', done: false },
         t51: { label: '90-day milestone marked complete in Checklist1', done: false },
+        t79: { label: 'Recruiter confirms 90-day review call (with screenshot)', done: false },
+        t80: { label: 'Review summary emailed to joinee (cc recruiter) and joinee confirmed receipt', done: false },
       },
     },
     // ── Phase 7: 5 Months After DOJ ───────────────────────────────────────────
@@ -465,13 +482,63 @@ function isPhaseComplete(checklist, phaseKey) {
 
 // Patch any tasks present in the default checklist but missing from a saved one.
 // This handles employees whose state was saved before new tasks were added to the schema.
+// Step 5 (HR spec): once the manager confirms a 30/60/90 review sheet, email the joinee
+// a summary of that review (written by the system from the review tab) with the recruiter
+// on cc. Never throws — if it can't be sent, the recruiter is asked to share it by hand.
+async function sendReviewSummaryAfterConfirm(auth, employee, dayMark, opts = {}) {
+  try {
+    const result = await sendReviewSummaryToJoinee(auth, employee, dayMark, opts);
+    if (result === 'sent') activityLog.log(employee, `${dayMark}_day_review_summary_sent`);
+    return result;
+  } catch (err) {
+    console.warn(`[Index] Could not send ${dayMark}-day review summary to ${employee.name}: ${err.message}`);
+    await sendReviewSummaryEscalation(employee, dayMark).catch(e =>
+      console.warn(`[Index] Could not send review summary escalation for ${employee.name}: ${e.message}`)
+    );
+    return 'failed';
+  }
+}
+
+// Also drops retired tasks so a stale pending entry can't block isPhaseComplete.
+const RETIRED_TASKS = ['t38']; // t38: day-25 feedback form email — replaced by the day-23 survey (t70/t71)
 function migrateChecklist(checklist) {
+  // A joinee who already got the old day-25 feedback form (t38) has had their survey —
+  // without this, restore would send the day-23 survey to them straight away.
+  let gotOldFeedbackForm = false;
+  for (const phase of Object.values(checklist)) {
+    if (!phase || !phase.tasks) continue;
+    for (const taskId of RETIRED_TASKS) {
+      if (phase.tasks[taskId]) {
+        if (taskId === 't38' && phase.tasks[taskId].done) gotOldFeedbackForm = true;
+        delete phase.tasks[taskId];
+        console.log(`[Checklist] Removed retired task ${taskId}`);
+      }
+    }
+  }
   const defaults = buildDefaultChecklist();
+  // Add phases that didn't exist when the checklist was saved (e.g. phase3a, the day-23
+  // survey) — otherwise their tasks can never be marked done. Keys are rebuilt in the
+  // default order so the new phase shows in its place on the status pages.
+  if (Object.keys(defaults).some(k => !checklist[k])) {
+    const saved = { ...checklist };
+    for (const k of Object.keys(checklist)) delete checklist[k];
+    for (const k of Object.keys(defaults)) {
+      if (saved[k]) { checklist[k] = saved[k]; continue; }
+      checklist[k] = { ...defaults[k], tasks: {} };
+      console.log(`[Checklist] Added missing phase ${k}: "${defaults[k].label}"`);
+    }
+    for (const k of Object.keys(saved)) if (!checklist[k]) checklist[k] = saved[k];
+  }
   for (const [phaseKey, phase] of Object.entries(defaults)) {
     if (!checklist[phaseKey]) continue;
     for (const [taskId, task] of Object.entries(phase.tasks)) {
       if (!checklist[phaseKey].tasks[taskId]) {
         checklist[phaseKey].tasks[taskId] = { ...task };
+        if (gotOldFeedbackForm && (taskId === 't70' || taskId === 't71')) {
+          checklist[phaseKey].tasks[taskId].done = true;
+          console.log(`[Checklist] Migrated missing task ${taskId} as done — old day-25 feedback form (t38) was already sent`);
+          continue;
+        }
         console.log(`[Checklist] Migrated missing task ${taskId}: "${task.label}"`);
       }
     }
@@ -1637,44 +1704,156 @@ async function handleReply(auth, classified, rawMsg) {
       }
       break;
 
-    case 'catchup25_complete':
+    case 'catchup25_complete': {
+      // HR spec requires the "Confirmed" reply to carry a meeting screenshot —
+      // only mark t64 once an image attachment is found and saved to Drive.
+      const IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.heic', '.webp'];
+      const attachments = (rawMsg && rawMsg.attachments) || [];
+      const screenshot = attachments.find(a => IMAGE_EXTS.some(ext => (a.filename || '').toLowerCase().endsWith(ext)));
+
+      if (!screenshot) {
+        console.warn(`[Index] "Confirmed" reply for ${employee.name}'s 25-day catchup had no screenshot attached — not marking t64 yet`);
+        break;
+      }
+
+      try {
+        const { google } = require('googleapis');
+        const drive = google.drive({ version: 'v3', auth });
+        let buffer;
+        if (screenshot.data) {
+          buffer = Buffer.from(screenshot.data, 'base64');
+        } else if (screenshot.attachmentId) {
+          buffer = await downloadAttachment(auth, rawMsg.id, screenshot.attachmentId);
+        }
+        if (buffer && employee.driveFolderId) {
+          const subfolderRes = await drive.files.list({
+            q: `name='Catchup25_Screenshot' and '${employee.driveFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+            fields: 'files(id)',
+          });
+          let targetFolderId = subfolderRes.data.files && subfolderRes.data.files[0] && subfolderRes.data.files[0].id;
+          if (!targetFolderId) {
+            const created = await drive.files.create({
+              requestBody: { name: 'Catchup25_Screenshot', mimeType: 'application/vnd.google-apps.folder', parents: [employee.driveFolderId] },
+              fields: 'id',
+            });
+            targetFolderId = created.data.id;
+          }
+          const { Readable } = require('stream');
+          await drive.files.create({
+            requestBody: { name: screenshot.filename, parents: [targetFolderId] },
+            media: { mimeType: screenshot.mimeType, body: Readable.from(buffer) },
+            fields: 'id',
+          });
+          console.log(`[Index] Saved 25-day catchup screenshot for ${employee.name} → Catchup25_Screenshot/${screenshot.filename}`);
+        }
+      } catch (err) {
+        console.warn(`[Index] Could not save 25-day catchup screenshot for ${employee.name}: ${err.message}`);
+      }
+
       markAndLog(employee, 't64');
-      markAndLog(employee, 't65');
       activityLog.log(employee, '25_day_catchup_complete');
-      await mark25DayCatchupDone(auth, employee).catch(() => {});
-      console.log(`[Index] 25-day catchup confirmed for ${employee.name}`);
+      console.log(`[Index] 25-day catchup confirmed (with screenshot) for ${employee.name}`);
       break;
+    }
 
     case 'catchup_complete':
-      // Part 2 of 30-day review — manager confirms "Done" after recruiter already filled sheet (Part 1)
-      // t43 (sheet filled) is marked by scheduleRecruiterSheetPoller when sheet is detected filled
+      // Step 3 (HR spec) — manager (cc recruiter) replies "Confirmed" that the sheet is
+      // filled and OK. t43 (recruiter section filled) is marked by the poller; final
+      // completion (t45) now waits on the joinee's receipt confirmation (Step 5/6).
       markAndLog(employee, 't44');
-      markAndLog(employee, 't45');
-      activityLog.log(employee, '30_day_catchup_complete');
-      await mark30DayDone(auth, employee).catch(() => {});
-      console.log(`[Index] 30-day review confirmed by manager for ${employee.name}`);
+      activityLog.log(employee, '30_day_manager_confirmed');
+      console.log(`[Index] 30-day review sheet confirmed OK by manager for ${employee.name}`);
+      await sendReviewSummaryAfterConfirm(auth, employee, 30);
       break;
 
     case 'review_complete': {
-      // Part 2 of 60/90-day review — manager confirms "Done" after recruiter already filled sheet (Part 1)
-      // t46/t49 (sheet filled) are marked by scheduleRecruiterSheetPoller; here we only mark manager confirm tasks
+      // Step 3 (HR spec) — manager confirms sheet is filled/OK for 60 or 90-day review.
       const daysSinceDoj = Math.floor(
         (Date.now() - new Date(employee.doj).getTime()) / (1000 * 60 * 60 * 24)
       );
       if (daysSinceDoj < 85) {
-        markAndLog(employee, 't48');
-        activityLog.log(employee, '60_day_review_complete');
-        await mark60DayDone(auth, employee).catch(() => {});
-        console.log(`[Index] 60-day review confirmed by manager for ${employee.name}`);
+        markAndLog(employee, 't47');
+        activityLog.log(employee, '60_day_manager_confirmed');
+        console.log(`[Index] 60-day review sheet confirmed OK by manager for ${employee.name}`);
+        await sendReviewSummaryAfterConfirm(auth, employee, 60);
       } else if (daysSinceDoj < 135) {
-        markAndLog(employee, 't51');
-        activityLog.log(employee, '90_day_review_complete');
-        await mark90DayDone(auth, employee).catch(() => {});
-        console.log(`[Index] 90-day review confirmed by manager for ${employee.name}`);
+        markAndLog(employee, 't50');
+        activityLog.log(employee, '90_day_manager_confirmed');
+        console.log(`[Index] 90-day review sheet confirmed OK by manager for ${employee.name}`);
+        await sendReviewSummaryAfterConfirm(auth, employee, 90);
       } else {
         console.warn(`[Index] review_complete reply for ${employee.name} arrived at day ${daysSinceDoj} — outside expected 60/90-day windows, ignoring`);
         activityLog.log(employee, 'review_complete_out_of_window', `day ${daysSinceDoj}`);
       }
+      break;
+    }
+
+    case 'review_summary_shared': {
+      // Step 4 (HR spec) — recruiter replies "Confirmed" + a screenshot to confirm
+      // they shared the review summary with the joinee.
+      const dayMarkMatch = (rawMsg.subject || '').match(/(\d+)-Day Review Summary/i);
+      const dayMark = dayMarkMatch ? parseInt(dayMarkMatch[1], 10) : null;
+      const IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.heic', '.webp'];
+      const attachments = (rawMsg && rawMsg.attachments) || [];
+      const screenshot = attachments.find(a => IMAGE_EXTS.some(ext => (a.filename || '').toLowerCase().endsWith(ext)));
+
+      if (!dayMark || ![30, 60, 90].includes(dayMark)) {
+        console.warn(`[Index] review_summary_shared reply for ${employee.name} — could not determine dayMark from subject "${rawMsg.subject}"`);
+        break;
+      }
+      if (!screenshot) {
+        console.warn(`[Index] review_summary_shared reply for ${employee.name}'s ${dayMark}-day review had no screenshot attached — not marking done yet`);
+        break;
+      }
+
+      const taskId = dayMark === 30 ? 't73' : dayMark === 60 ? 't76' : 't79';
+      markAndLog(employee, taskId);
+      activityLog.log(employee, `${dayMark}_day_review_summary_shared`);
+      console.log(`[Index] Recruiter confirmed sharing ${dayMark}-day review summary (with screenshot) for ${employee.name}`);
+      break;
+    }
+
+    case 'review_summary_received_confirmed': {
+      // Step 5/6 (HR spec) — joinee confirms they received the review summary.
+      // Verify the tab is genuinely non-empty, then mark the milestone fully complete.
+      const dayMarkMatch = (rawMsg.subject || '').match(/(\d+)-Day Review Summary/i);
+      const dayMark = dayMarkMatch ? parseInt(dayMarkMatch[1], 10) : null;
+      if (!dayMark || ![30, 60, 90].includes(dayMark)) {
+        console.warn(`[Index] review_summary_received_confirmed reply for ${employee.name} — could not determine dayMark from subject "${rawMsg.subject}"`);
+        break;
+      }
+      const monthTab = dayMark === 30 ? 'Tracking - Month -1' : dayMark === 60 ? 'Tracking - Month -2' : 'Tracking - Month -3';
+      const filled = await isReviewSheetFullyFilled(auth, employee.projectIntroSheetId, monthTab).catch(() => false);
+      if (!filled) {
+        console.warn(`[Index] ${employee.name}'s ${dayMark}-day joinee confirmed receipt, but ${monthTab} is not fully filled yet — not marking complete`);
+        break;
+      }
+      markAndLog(employee, dayMark === 30 ? 't74' : dayMark === 60 ? 't77' : 't80'); // joinee confirmed receipt
+      const finalTaskId = dayMark === 30 ? 't45' : dayMark === 60 ? 't48' : 't51';
+      markAndLog(employee, finalTaskId);
+      activityLog.log(employee, `${dayMark}_day_review_complete`);
+      if (dayMark === 30) await mark30DayDone(auth, employee).catch(() => {});
+      else if (dayMark === 60) await mark60DayDone(auth, employee).catch(() => {});
+      else await mark90DayDone(auth, employee).catch(() => {});
+      console.log(`[Index] ${dayMark}-day review fully complete (joinee confirmed) for ${employee.name}`);
+      break;
+    }
+
+    case 'review_summary_not_received': {
+      // Step 6 negative branch (HR spec) — joinee says they haven't received the
+      // summary. Check whether the recruiter already confirmed sharing it: if not,
+      // resend the share reminder; if they did, escalate (ask recruiter to resend).
+      const dayMarkMatch = (rawMsg.subject || '').match(/(\d+)-Day Review Summary/i);
+      const dayMark = dayMarkMatch ? parseInt(dayMarkMatch[1], 10) : null;
+      if (!dayMark || ![30, 60, 90].includes(dayMark)) {
+        console.warn(`[Index] review_summary_not_received reply for ${employee.name} — could not determine dayMark from subject "${rawMsg.subject}"`);
+        break;
+      }
+      activityLog.log(employee, `${dayMark}_day_review_summary_not_received`);
+      // The summary is sent by the system, so resend it (cc recruiter). If it can't be
+      // sent, the recruiter is asked to share it by hand.
+      const resent = await sendReviewSummaryAfterConfirm(auth, employee, dayMark, { force: true });
+      console.log(`[Index] ${employee.name} said "Not Received" for ${dayMark}-day summary — resend: ${resent}`);
       break;
     }
 
@@ -2183,10 +2362,10 @@ async function onboardEmployee(auth, employee) {
       }
     };
 
-    const preDOJDate = new Date(employee.doj);
-    preDOJDate.setDate(preDOJDate.getDate() - 2);
-    if (preDOJDate.getDay() === 6) preDOJDate.setDate(preDOJDate.getDate() - 1); // Saturday → Friday
-    if (preDOJDate.getDay() === 0) preDOJDate.setDate(preDOJDate.getDate() - 2); // Sunday → Friday
+    const preDOJBase = new Date(employee.doj);
+    preDOJBase.setDate(preDOJBase.getDate() - 2);
+    // Weekend or national holiday → back to the previous working day
+    const preDOJDate = require('./workingDays').ensureWorkingDayBackward(preDOJBase);
     const preDOJStr = preDOJDate.toISOString().split('T')[0];
 
     if (preDOJStr <= todayStr) {
@@ -2470,11 +2649,14 @@ async function main() {
   }
 
   // ─── Optional config warnings ────────────────────────────────────────────
-  const feedbackFormLink = process.env.EMPLOYEE_FEEDBACK_FORM_LINK || '';
-  if (!feedbackFormLink || feedbackFormLink.startsWith('#') || feedbackFormLink.includes('YOUR_FORM_ID')) {
-    console.warn('[Config] WARNING: EMPLOYEE_FEEDBACK_FORM_LINK is not set or is a placeholder.');
-    console.warn('[Config]   Employees on day 25 will receive an email with a broken feedback form link.');
-    console.warn('[Config]   Set a real Google Form URL in .env to fix this.\n');
+  const { parseRooms } = require('./roomBooking');
+  if (parseRooms().length === 0) {
+    console.warn('[Config] WARNING: MEETING_ROOMS is not set — no meeting rooms will be booked for HR Induction, 25-day catchup or 30/60/90-day reviews.\n');
+  }
+
+  if (!process.env.ONBOARDING_SURVEY_TEMPLATE_FORM_ID) {
+    console.warn('[Config] WARNING: ONBOARDING_SURVEY_TEMPLATE_FORM_ID is not set.');
+    console.warn('[Config]   Day-23 "Employee Feedback Form: Onboarding Experience" copies cannot be created — the survey will not be sent.\n');
   }
 
   const webhookUrl = process.env.WEBHOOK_BASE_URL || '';
@@ -2569,6 +2751,8 @@ async function main() {
         employeeInfoSheetId: saved ? (saved.employeeInfoSheetId || null) : null,
         catchupSheetId: saved ? (saved.catchupSheetId || null) : null,
         catchupSheetUrl: saved ? (saved.catchupSheetUrl || null) : null,
+        onboardingSurveyForm: saved ? (saved.onboardingSurveyForm || null) : null,
+        reviewSummarySentAt: saved ? (saved.reviewSummarySentAt || {}) : {},
         meetLinks: saved ? (saved.meetLinks || {}) : {},
         verificationResults: saved ? (saved.verificationResults || {}) : {},
         extractedData: saved ? (saved.extractedData || {}) : {},
@@ -2649,6 +2833,8 @@ async function main() {
       if (!employee.employeeInfoSheetId && saved && saved.employeeInfoSheetId) employee.employeeInfoSheetId = saved.employeeInfoSheetId;
       if (!employee.catchupSheetId && saved && saved.catchupSheetId) employee.catchupSheetId = saved.catchupSheetId;
       if (!employee.catchupSheetUrl && saved && saved.catchupSheetUrl) employee.catchupSheetUrl = saved.catchupSheetUrl;
+      if (!employee.onboardingSurveyForm && saved && saved.onboardingSurveyForm) employee.onboardingSurveyForm = saved.onboardingSurveyForm;
+      if (!employee.reviewSummarySentAt && saved && saved.reviewSummarySentAt) employee.reviewSummarySentAt = saved.reviewSummarySentAt;
       if (!employee.meetLinks && saved && saved.meetLinks) employee.meetLinks = saved.meetLinks;
       if (saved && saved.milestonesScheduled && !employee.milestonesScheduled) employee.milestonesScheduled = true;
       if (saved && saved.verificationResults) employee.verificationResults = saved.verificationResults;
