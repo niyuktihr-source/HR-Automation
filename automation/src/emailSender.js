@@ -1229,7 +1229,7 @@ async function sendDayBeforeReminder(employee, dayMark, milestoneDate) {
         <li>The system will email the <strong>${esc(monthTab)}</strong> tab in the Tracking sheet to the reporting manager to confirm — the manager must reply "Confirmed" to close the milestone</li>
         <li>The system will email the Tracking sheet to the recruiter to confirm — the recruiter must upload a screenshot of the meeting to the email and also reply "Confirmed" to close the milestone</li>
       </ul>
-      <p>Regards,<br/>${co} Automation</p>
+      <p>Regards,<br/>${co} HR Automation</p>
     `,
   });
 }
@@ -1369,25 +1369,32 @@ async function sendDOJScreenshotRequest(employee) {
 }
 
 // Recruiter sheet reminder — sent daily until recruiter fills the review tab (Part 1)
-async function sendRecruiterSheetReminder(employee, recruiterEmail, dayMark, sheetUrl) {
+// Sent on working days while the review tab isn't filled: to the recruiter if the "Filled by
+// Recruiter" section is empty, to the manager if the manager's section is empty (both if both).
+async function sendReviewSheetReminder(employee, dayMark, { recruiterMissing = true, managerMissing = false } = {}) {
   const { name, employeeId } = employee;
   const co = esc(process.env.COMPANY_NAME || '');
+  const contacts = employee.contacts || {};
   const monthTab = dayMark === 30 ? 'Tracking - Month -1' : dayMark === 60 ? 'Tracking - Month -2' : 'Tracking - Month -3';
+  const to = [recruiterMissing && contacts.recruiterEmail, managerMissing && contacts.managerEmail].filter(Boolean).join(', ');
+  if (!to) return;
+  const sheetUrl = employee.projectIntroSheetId ? `https://docs.google.com/spreadsheets/d/${employee.projectIntroSheetId}` : null;
+  const pending = [
+    recruiterMissing && `the <strong>"Filled by Recruiter"</strong> section (recruiter)`,
+    managerMissing && `the <strong>"Filled by Manager"</strong> section (reporting manager)`,
+  ].filter(Boolean).join(' and ');
   const sheetSection = sheetUrl
     ? `<p style="margin:16px 0;"><a href="${sheetUrl}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;">Open Tracking Sheet — ${esc(monthTab)}</a></p>`
     : '';
   return sendEmail({
-    to: recruiterEmail,
+    to,
     subject: `Reminder — Fill the ${dayMark}-Day Review Sheet for ${esc(name)} (${esc(employeeId)})`,
     html: `
       <p>Hi,</p>
-      <div style="margin:16px 0;padding:12px 16px;background:#fff8e1;border-left:4px solid #ffa000;border-radius:2px;">
-        <p style="margin:0 0 4px;font-weight:bold;color:#333;">What this reminder is about</p>
-        <p style="margin:0;color:#555;">The <strong>${dayMark}-day project review</strong> for <strong>${esc(name)}</strong> (ID: ${esc(employeeId)}) was triggered ${dayMark} days after their joining. The review tracking sheet has a section <strong>"Filled by Recruiter"</strong> in the <strong>${esc(monthTab)}</strong> tab that you need to fill. The onboarding checklist cannot move forward until this is done. Once you fill it, the system will automatically email the manager to confirm the review.</p>
-      </div>
-      <p><strong>What to do:</strong> Open the tracking sheet, go to the <strong>${esc(monthTab)}</strong> tab, and fill in the "Filled by Recruiter" section.</p>
+      <p>The <strong>${dayMark}-day review</strong> for <strong>${esc(name)}</strong> (${esc(employeeId)}) is still pending: ${pending} of the <strong>${esc(monthTab)}</strong> tab in the tracking sheet is not filled in yet.</p>
+      <p>Once both sections are filled, the system will email the reporting manager to confirm the review.</p>
       ${sheetSection}
-      <p style="font-size:13px;color:#888;">You will continue to receive this reminder every day until the sheet is updated.</p>
+      <p style="font-size:13px;color:#888;">This reminder is sent every working day until the tab is filled.</p>
       <p>Regards,<br/>${co} HR</p>
     `,
   });
@@ -1402,10 +1409,10 @@ async function sendManagerConfirmationRequest(employee, managerEmail, dayMark, r
     ? `https://docs.google.com/spreadsheets/d/${employee.projectIntroSheetId}`
     : null;
   const sheetLinkText = sheetUrl ? ` (Sheet Link: ${sheetUrl})` : '';
-  const to = [managerEmail, recruiterEmail].filter(Boolean).join(', ');
-  if (!to) return;
+  if (!managerEmail) return;
   return sendEmail({
-    to,
+    to: managerEmail,
+    cc: recruiterEmail || undefined,
     subject: `Action Required — Confirm ${dayMark}-Day Review for ${esc(name)} (${esc(employeeId)})`,
     html: `
       <p>Dear Manager,</p>
@@ -1428,7 +1435,7 @@ async function sendReviewSummaryShareReminder(employee, dayMark, eventDateStr) {
     subject: `${dayMark}-Day Review Summary — Review Call Screenshot Needed — ${esc(name)} (${esc(employeeId)})`,
     html: `
       <p>Dear Recruiter,</p>
-      <p>As per the HR guidelines, you have completed the ${dayMark}-day review${eventDateStr ? ` on <strong>${esc(eventDateStr)}</strong>` : ''}. Once the reporting manager confirms the review sheet, the review summary will be emailed to ${esc(name)} automatically, with you on cc.</p>
+      <p>As per the HR guidelines, you have completed the ${dayMark}-day review${eventDateStr ? ` on <strong>${esc(eventDateStr)}</strong>` : ''}, and the review form has been duly filled in. Once the reporting manager confirms the review sheet, the review summary is emailed to ${esc(name)} automatically, with you on cc.</p>
       <p>Kindly reply to this email with <strong>"Confirmed"</strong> and attach a screenshot of the review call to mark the activity as complete.</p>
       <p>Thank you,<br/>Niyukti</p>
     `,
@@ -1455,7 +1462,7 @@ async function sendReviewSummaryEmail(employee, dayMark, summaryText) {
       <p>Dear ${esc(name)},</p>
       <p>As per HR guidelines, your <strong>${dayMark}-day review</strong> has been completed. Here is the summary of your review:</p>
       <div style="margin:16px 0;padding:12px 16px;background:#f5f7fa;border-left:4px solid #1a73e8;border-radius:2px;color:#333;">${summaryHtml}</div>
-      <p>Kindly reply to this email with <strong>"Confirmed"</strong> to acknowledge that you have received your review summary. If you have any trouble reading it, reply with <strong>"Not Received"</strong> and we will send it again.</p>
+      <p>Kindly reply to this email with <strong>"Confirmed"</strong> to mark the activity as complete. If you have not received the review summary, please reply with <strong>"Not Received"</strong>.</p>
       <p>Regards,<br/>${co} HR</p>
     `,
   });
@@ -1570,7 +1577,7 @@ module.exports = {
   sendDOJScreenshotRequest,
   sendDocumentCrossCheckAlert,
   sendDayBeforeReminder,
-  sendRecruiterSheetReminder,
+  sendReviewSheetReminder,
   sendManagerConfirmationRequest,
   sendReviewSummaryShareReminder,
   sendReviewSummaryEmail,

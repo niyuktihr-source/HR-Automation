@@ -8,7 +8,7 @@ const {
   sendPhaseCompletionSummary,
   sendReviewSummaryRequest,
   sendNoReplyEscalation,
-  sendRecruiterSheetReminder,
+  sendReviewSheetReminder,
   sendManagerConfirmationRequest,
 } = require('./emailSender');
 const {
@@ -115,7 +115,20 @@ function scheduleOnce(targetDate, label, fn) {
 // Used where the fire time must match a specific real-world clock time (e.g. "N hours
 // after a calendar invite's start time"), unlike scheduleOnce which derives hour/minute
 // from the server-local interpretation of targetDate.
-function scheduleOnceAtIST(targetDate, hour, minute, label, fn) {
+// ifPast: what to do when that IST time has already passed (e.g. after a restart) —
+// 'run' runs it now (default; like scheduleOnce), 'skip' drops it. Without this, the
+// "m h D M *" expression would fire on the same date next year.
+function scheduleOnceAtIST(targetDate, hour, minute, label, fn, { ifPast = 'run' } = {}) {
+  const targetMs = Date.UTC(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), hour, minute) - 330 * 60 * 1000;
+  if (targetMs <= Date.now()) {
+    if (ifPast === 'skip') {
+      console.log(`[Cron] "${label}" time has already passed — skipping`);
+      return null;
+    }
+    console.log(`[Cron] "${label}" target is in the past — running immediately`);
+    fn().catch(err => console.error(`[Cron] "${label}" error:`, err.message));
+    return null;
+  }
   const expression = `${minute} ${hour} ${targetDate.getDate()} ${targetDate.getMonth() + 1} *`;
   console.log(`[Cron] Scheduled "${label}" → ${targetDate.toDateString()} at ${hour}:${String(minute).padStart(2, '0')} IST (${expression})`);
 
@@ -563,7 +576,7 @@ function scheduleReviewSummaryFollowup(employee, dayMark, eventDate) {
       console.warn(`[Cron] ${dayMark}-day review call screenshot reminder failed for ${name}: ${err.message}`)
     );
     console.log(`[Cron] ${dayMark}-day review call screenshot reminder sent for ${name}`);
-  });
+  }, { ifPast: 'skip' }); // already sent before a restart — don't send it again
 }
 
 // Schedule BGV initiation email to recruiter — fires on DOJ
@@ -921,56 +934,33 @@ function startDataRetentionCron() {
 // markTaskFn: function(taskId) to update checklist
 // eventDate: the actual review call Date, used to render "<Calendar invite date>" in the manager email
 function scheduleRecruiterSheetPoller(employee, recruiterEmail, managerEmail, dayMark, partOneTaskId, markTaskFn, eventDate) {
-  const { name, employeeId } = employee;
+  const { name } = employee;
   const monthTab = dayMark === 30 ? 'Tracking - Month -1' : dayMark === 60 ? 'Tracking - Month -2' : 'Tracking - Month -3';
   const cfg = dayMark === 30 ? config.calendarEvents.catchup30day : config.calendarEvents.reviewMeeting;
   const eventDateStr = eventDate ? formatEventDateStr(eventDate, cfg.hour, cfg.minute) : '';
   let jobHandle = null;
   let stopped = false;
 
-  const sheetUrl = employee.projectIntroSheetId
-    ? `https://docs.google.com/spreadsheets/d/${employee.projectIntroSheetId}`
-    : null;
-
-  const isSheetFilled = async () => {
-    if (!employee._auth || !employee.projectIntroSheetId) return false;
-    try {
-      const { google } = require('googleapis');
-      const sheets = google.sheets({ version: 'v4', auth: employee._auth });
-      const res = await sheets.spreadsheets.values.get({
-        spreadsheetId: employee.projectIntroSheetId,
-        range: `'${monthTab}'!B14:B16`,
-      });
-      const rows = (res.data.values || []);
-      return rows.some(r => r && r[0] && String(r[0]).trim().length > 0);
-    } catch (err) {
-      console.warn(`[Cron] Sheet poll failed for ${name} (${dayMark}-day): ${err.message}`);
-      return false;
-    }
+  const stop = () => {
+    stopped = true;
+    if (jobHandle) { try { jobHandle.stop(); } catch (_) {} }
   };
 
   const check = async () => {
-    if (stopped || employee.status === 'stopped' || employee.isStopped) {
-      stopped = true;
-      if (jobHandle) { try { jobHandle.stop(); } catch (_) {} }
-      return;
-    }
-    if (isTaskDone(employee.checklist, partOneTaskId)) {
-      stopped = true;
-      if (jobHandle) { try { jobHandle.stop(); } catch (_) {} }
-      return;
-    }
+    if (stopped || employee.status === 'stopped' || employee.isStopped || isTaskDone(employee.checklist, partOneTaskId)) return stop();
+    if (!employee._auth || !employee.projectIntroSheetId) return;
+    if (!isWorkingDay(new Date())) return; // no reminders on weekends / national holidays
 
-    const filled = await isSheetFilled();
+    const { reviewSheetSections } = require('./statusTracker');
+    const sections = await reviewSheetSections(employee._auth, employee.projectIntroSheetId, monthTab);
+    if (!sections) return; // couldn't read the sheet — try again next working day, don't send a wrong reminder
 
-    if (filled) {
-      stopped = true;
-      if (jobHandle) { try { jobHandle.stop(); } catch (_) {} }
-      // Part 1 complete — mark review task green
+    if (sections.recruiterFilled && sections.managerFilled) {
+      stop();
+      // Tab filled by both — mark it and ask the manager (cc recruiter) to confirm, per HR Step 3
       if (markTaskFn) markTaskFn(partOneTaskId);
       if (employee._saveState) employee._saveState();
-      console.log(`[Cron] Recruiter filled ${dayMark}-day sheet for ${name} — ${partOneTaskId} marked done`);
-      // Part 2 — email manager (cc recruiter) to confirm review is done, per HR Step 3
+      console.log(`[Cron] ${monthTab} filled (recruiter + manager) for ${name} — ${partOneTaskId} marked done`);
       if (managerEmail) {
         await sendManagerConfirmationRequest(employee, managerEmail, dayMark, recruiterEmail, eventDateStr).catch(err =>
           console.warn(`[Cron] Manager confirmation request failed for ${name}: ${err.message}`)
@@ -980,30 +970,22 @@ function scheduleRecruiterSheetPoller(employee, recruiterEmail, managerEmail, da
       return;
     }
 
-    // Sheet not filled yet — remind recruiter
-    if (recruiterEmail) {
-      await sendRecruiterSheetReminder(employee, recruiterEmail, dayMark, sheetUrl).catch(err =>
-        console.warn(`[Cron] Recruiter sheet reminder failed for ${name}: ${err.message}`)
-      );
-      console.log(`[Cron] Recruiter sheet reminder (${dayMark}-day) sent for ${name}`);
-    }
+    // Not filled yet — remind whoever's section is empty
+    await sendReviewSheetReminder(employee, dayMark, { recruiterMissing: !sections.recruiterFilled, managerMissing: !sections.managerFilled }).catch(err =>
+      console.warn(`[Cron] Review sheet reminder failed for ${name}: ${err.message}`)
+    );
+    console.log(`[Cron] ${dayMark}-day review sheet reminder sent for ${name} — pending: ${[!sections.recruiterFilled && 'recruiter', !sections.managerFilled && 'manager'].filter(Boolean).join(' + ')}`);
   };
 
-  // First check 24h after the initial review email fires, then daily at 9 AM IST
-  const msDelay = 24 * 60 * 60 * 1000;
+  // First check 24h after the review call is set up, then every day at 9 AM IST
   setTimeout(async () => {
     await check();
     if (!stopped) {
       jobHandle = cron.schedule('0 9 * * *', check, { timezone: config.timezone || 'Asia/Kolkata' });
     }
-  }, msDelay);
+  }, 24 * 60 * 60 * 1000);
 
-  return {
-    stop() {
-      stopped = true;
-      if (jobHandle) { try { jobHandle.stop(); } catch (_) {} }
-    },
-  };
+  return { stop };
 }
 
 // Keep the old export name for any callers outside the review flow (e.g. project intro sheet)

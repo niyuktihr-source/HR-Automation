@@ -509,24 +509,32 @@ async function renameStatusSheet(auth, employee, aadhaarName) {
 }
 
 // ─── 30/60/90-day review — verify the tracking tab is genuinely filled ─────
-// Checks BOTH the recruiter section (B14:B16, "Filled by Recruiter") and the
-// manager/quality rating rows (B7:C11) before the milestone is allowed to close —
-// matches HR's Step 6 requirement that "Tab 1 should not be empty."
-async function isReviewSheetFullyFilled(auth, spreadsheetId, monthTab) {
-  if (!spreadsheetId) return false;
+// Two sections of the "Tracking - Month -N" tab: the recruiter's ("Filled by Recruiter",
+// B14:B16) and the manager's quality ratings/observations (B7:C11). Returns
+// { recruiterFilled, managerFilled }, or null if the sheet couldn't be read (so callers
+// don't treat a read error as "empty" and send a wrong reminder).
+async function reviewSheetSections(auth, spreadsheetId, monthTab) {
+  if (!spreadsheetId) return { recruiterFilled: false, managerFilled: false };
   try {
     const sheets = google.sheets({ version: 'v4', auth });
     const [recruiterRes, managerRes] = await Promise.all([
-      apiWithRetry(() => sheets.spreadsheets.values.get({ spreadsheetId, range: `'${monthTab}'!B14:B16` }), 'isReviewSheetFullyFilled:recruiter'),
-      apiWithRetry(() => sheets.spreadsheets.values.get({ spreadsheetId, range: `'${monthTab}'!B7:C11` }), 'isReviewSheetFullyFilled:manager'),
+      apiWithRetry(() => sheets.spreadsheets.values.get({ spreadsheetId, range: `'${monthTab}'!B14:B16` }), 'reviewSheetSections:recruiter'),
+      apiWithRetry(() => sheets.spreadsheets.values.get({ spreadsheetId, range: `'${monthTab}'!B7:C11` }), 'reviewSheetSections:manager'),
     ]);
-    const recruiterFilled = (recruiterRes.data.values || []).some(r => r && r[0] && String(r[0]).trim().length > 0);
-    const managerFilled = (managerRes.data.values || []).some(row => (row || []).some(cell => cell && String(cell).trim().length > 0));
-    return recruiterFilled && managerFilled;
+    return {
+      recruiterFilled: (recruiterRes.data.values || []).some(r => r && r[0] && String(r[0]).trim().length > 0),
+      managerFilled: (managerRes.data.values || []).some(row => (row || []).some(cell => cell && String(cell).trim().length > 0)),
+    };
   } catch (err) {
-    console.warn(`[Status] isReviewSheetFullyFilled failed for ${spreadsheetId} (${monthTab}): ${err.message}`);
-    return false;
+    console.warn(`[Status] Could not read ${monthTab} of ${spreadsheetId}: ${err.message}`);
+    return null;
   }
+}
+
+// Both sections filled — HR's Step 6 requirement that "Tab 1 should not be empty".
+async function isReviewSheetFullyFilled(auth, spreadsheetId, monthTab) {
+  const s = await reviewSheetSections(auth, spreadsheetId, monthTab);
+  return !!(s && s.recruiterFilled && s.managerFilled);
 }
 
 module.exports = {
@@ -564,6 +572,7 @@ module.exports = {
   readCatchup25RecruiterSummary,
   summarizeCatchup25Notes,
   isReviewSheetFullyFilled,
+  reviewSheetSections,
 };
 
 // ─── Project Intro Sheet ───────────────────────────────────────────────────────

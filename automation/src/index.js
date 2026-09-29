@@ -27,6 +27,7 @@ const {
   sendDOJScreenshotRequest,
   sendDocumentCrossCheckAlert,
   sendReviewSummaryEscalation,
+  sendReviewSheetReminder,
 } = require('./emailSender');
 const {
   scheduleAllMilestones,
@@ -73,7 +74,7 @@ const {
   createProjectIntroSheet,
   createEmployeeInfoSheet,
   getOrCreateCatchupSheet,
-  isReviewSheetFullyFilled,
+  reviewSheetSections,
 } = require('./statusTracker');
 const { updateMasterDashboard } = require('./masterDashboard');
 
@@ -1828,9 +1829,14 @@ async function handleReply(auth, classified, rawMsg) {
         break;
       }
       const monthTab = dayMark === 30 ? 'Tracking - Month -1' : dayMark === 60 ? 'Tracking - Month -2' : 'Tracking - Month -3';
-      const filled = await isReviewSheetFullyFilled(auth, employee.projectIntroSheetId, monthTab).catch(() => false);
-      if (!filled) {
+      const sections = await reviewSheetSections(auth, employee.projectIntroSheetId, monthTab).catch(() => null);
+      if (!sections || !sections.recruiterFilled || !sections.managerFilled) {
+        // HR Step 6: "At this stage, Tab 1 should not be empty" — remind whoever's section is pending
         console.warn(`[Index] ${employee.name}'s ${dayMark}-day joinee confirmed receipt, but ${monthTab} is not fully filled yet — not marking complete`);
+        if (sections) {
+          await sendReviewSheetReminder(employee, dayMark, { recruiterMissing: !sections.recruiterFilled, managerMissing: !sections.managerFilled }).catch(err =>
+            console.warn(`[Index] Review sheet reminder failed for ${employee.name}: ${err.message}`));
+        }
         break;
       }
       markAndLog(employee, dayMark === 30 ? 't74' : dayMark === 60 ? 't77' : 't80'); // joinee confirmed receipt
