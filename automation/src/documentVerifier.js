@@ -484,6 +484,9 @@ const SUBFOLDER_DOCTYPE_MAP = {
   'Postgrad_Certificate': 'postgradCertificate',
   'HR_Induction_Screenshot':   'inductionScreenshot',
   'Project_Intro_Screenshot':  'projectIntroScreenshot',
+  'Current_Address_Proof':     'currentAddressProof',
+  'Permanent_Address_Proof':   'permanentAddressProof',
+  'UAN':                       'uan',
 };
 
 // Detect document type — subfolder is authoritative; content analysis is next; filename is last resort

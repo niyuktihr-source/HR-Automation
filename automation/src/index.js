@@ -718,6 +718,16 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
     return true;
   }
 
+  // Skip files already processed in a previous run (pass or fail) — before anything else,
+  // so a restart never re-reads an old document or sends a result/rejection email for it
+  // (a document that fails to be recognised on a later read must not be rejected again).
+  // A new upload gets a new file ID, so it is still processed fresh.
+  if (!employee.processedFileIds) employee.processedFileIds = new Set();
+  if (employee.processedFileIds.has(file.id)) {
+    console.log(`[Index] Skipping ${file.name} — already processed in a previous run`);
+    return true;
+  }
+
   // Drive push, polling, and form processing can report the same file concurrently.
   // Claim the file before verification so only one path can send result emails.
   if (!employee._processingFileIds) employee._processingFileIds = new Set();
@@ -746,16 +756,6 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
     employee.processedFileIds.add(file.id);
     releaseFileLock();
     saveState(employee.employeeId, snapshotEmployee(employee));
-    return true;
-  }
-
-  // Skip files already processed in a previous run (pass or fail) — prevents
-  // duplicate verification emails on every restart. A new upload gets a new file ID
-  // so it will be processed fresh even for the same doc type.
-  if (!employee.processedFileIds) employee.processedFileIds = new Set();
-  if (employee.processedFileIds.has(file.id)) {
-    console.log(`[Index] Skipping ${file.name} — already processed in a previous run`);
-    releaseFileLock();
     return true;
   }
 
