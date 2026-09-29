@@ -1561,7 +1561,6 @@ async function getOrCreateCatchupSheet(auth, employee) {
   const { name, employeeId, contacts } = employee;
   const recruiterEmail = contacts && contacts.recruiterEmail;
   const managerEmail = contacts && contacts.managerEmail;
-  const joineeEmail = employee.officialEmail || employee.personalEmail;
 
   // 1. If sheet ID is already known in memory or state, return its URL
   if (employee.catchupSheetId) {
@@ -1646,8 +1645,9 @@ async function getOrCreateCatchupSheet(auth, employee) {
       }), 'getOrCreateCatchupSheet:move');
     }
 
-    // 7. Share with recruiter, reporting manager, and joinee
-    const shareWith = [recruiterEmail, managerEmail, joineeEmail].filter(Boolean);
+    // 7. Share with recruiter (fills it in) and reporting manager (gets it on DOJ). Never the
+    //    joinee — the sheet holds the recruiter's catchup notes about them.
+    const shareWith = [recruiterEmail, managerEmail].filter(Boolean);
     for (const email of [...new Set(shareWith)]) {
       await drive.permissions.create({
         fileId: spreadsheetId,

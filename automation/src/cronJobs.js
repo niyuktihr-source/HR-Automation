@@ -79,7 +79,7 @@ function addDays(date, days) {
 }
 
 // Working days = Mon–Fri excluding national holidays — see workingDays.js
-const { ensureWorkingDay, addWorkingDays, previousWorkingDay } = require('./workingDays');
+const { ensureWorkingDay, addWorkingDays, previousWorkingDay, isWorkingDay } = require('./workingDays');
 
 // Convert a Date to a node-cron expression "minute hour day month *"
 function dateToCron(date) {
@@ -318,21 +318,27 @@ function schedule25DayCatchup(employee, markTaskFn) {
   });
 }
 
+// "25 Sep 2030 at 11:00 AM IST" — the 25-day call time shown in the recruiter reminder.
+function formatCatchup25Date(eventDate) {
+  const cfg = config.calendarEvents.catchup25day;
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const hour12 = cfg.hour > 12 ? cfg.hour - 12 : cfg.hour;
+  const ampm = cfg.hour >= 12 ? 'PM' : 'AM';
+  return `${eventDate.getDate()} ${months[eventDate.getMonth()]} ${eventDate.getFullYear()} at ${hour12}:${String(cfg.minute).padStart(2,'0')} ${ampm} IST`;
+}
+
 // Fires the recruiter reminder email `reminderDelayHours` after the call's start
 // time, then kicks off the daily sheet-fill poller.
 function schedule25DayCatchupReminder(employee, eventDate, markTaskFn) {
   const { name, employeeId } = employee;
   const cfg = config.calendarEvents.catchup25day;
   const reminderHour = cfg.hour + (cfg.reminderDelayHours || 0);
-  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const hour12 = cfg.hour > 12 ? cfg.hour - 12 : cfg.hour;
-  const ampm = cfg.hour >= 12 ? 'PM' : 'AM';
-  const eventDateStr = `${eventDate.getDate()} ${months[eventDate.getMonth()]} ${eventDate.getFullYear()} at ${hour12}:${String(cfg.minute).padStart(2,'0')} ${ampm} IST`;
+  const eventDateStr = formatCatchup25Date(eventDate);
 
   scheduleOnceAtIST(eventDate, reminderHour, cfg.minute, `25-Day Catchup Reminder — ${name}`, async () => {
     const { send25DayCatchupEmail } = require('./emailSender');
 
-    // Recruiter/HR only — the joinee already got the day-before heads-up, no second email on the call day.
+    // Recruiter only — the joinee already got the day-before heads-up, no second email on the call day.
     await send25DayCatchupEmail(employee, { meetLink: employee.meetLinks && employee.meetLinks['25day-catchup'], eventDateStr }).catch(err =>
       console.warn(`[Cron] 25-day catchup email failed for ${name}: ${err.message}`)
     );
@@ -346,80 +352,98 @@ function schedule25DayCatchupReminder(employee, eventDate, markTaskFn) {
   });
 }
 
-// Poll the 25-day catchup tracking sheet daily to detect when the recruiter has
-// filled in the joinee's Q&A answers (or free-text summary). If not filled,
-// re-send the same reminder email. Once filled, AI-summarize the discussion and
-// email manager + recruiter, then mark the milestone complete.
-function scheduleCatchup25SheetPoller(employee, eventDateStr, markTaskFn) {
+// The 25-day step is complete only when BOTH are in: the recruiter has filled the catchup
+// tracking sheet AND replied "Confirmed" with a meeting screenshot (t64). Until then the same
+// reminder email goes to the recruiter every working day at 9 AM IST. Once both are in, the
+// discussion is AI-summarised and emailed to manager + recruiter, and only after that email
+// is sent is the milestone marked complete (t65) — a failed send is retried next working day.
+const catchup25Checks = {}; // employeeId → check(), so a "Confirmed" reply can trigger it straight away
+
+// Options (used when resuming after a restart): initialDelayMs — when the first check runs;
+// firstCheckRemind — whether that first check may send a reminder; remind — false keeps the
+// poller silent (summary still sent once both are in) for a call long in the past.
+function scheduleCatchup25SheetPoller(employee, eventDateStr, markTaskFn, { initialDelayMs = 24 * 60 * 60 * 1000, firstCheckRemind = true, remind: remindDaily = true } = {}) {
   const { name, employeeId } = employee;
   let jobHandle = null;
   let stopped = false;
+  let running = false;
 
-  const check = async () => {
-    if (stopped || employee.status === 'stopped' || employee.isStopped) {
-      stopped = true;
-      if (jobHandle) { try { jobHandle.stop(); } catch (_) {} }
-      return;
-    }
-    if (isTaskDone(employee.checklist, 't65')) {
-      stopped = true;
-      if (jobHandle) { try { jobHandle.stop(); } catch (_) {} }
-      return;
-    }
-    if (!employee._auth) return;
+  const stop = () => {
+    stopped = true;
+    if (jobHandle) { try { jobHandle.stop(); } catch (_) {} }
+    if (catchup25Checks[employeeId] === check) delete catchup25Checks[employeeId];
+  };
 
-    const { isCatchup25SheetFilled, readCatchup25QAPairs, readCatchup25RecruiterSummary, summarizeCatchup25Notes, mark25DayCatchupDone } = require('./statusTracker');
-    const filled = await isCatchup25SheetFilled(employee._auth, employee).catch(err => {
-      console.warn(`[Cron] Catchup25 sheet poll failed for ${name}: ${err.message}`);
-      return false;
-    });
+  // remind: false when triggered by the recruiter's reply — never answer a reply with a reminder
+  const check = async ({ remind = true } = {}) => {
+    if (stopped || employee.status === 'stopped' || employee.isStopped || isTaskDone(employee.checklist, 't65')) return stop();
+    if (!employee._auth || running) return;
+    if (remind && !isWorkingDay(new Date())) return; // no reminders on weekends / national holidays
+    running = true;
+    try {
+      const { isCatchup25SheetFilled, readCatchup25QAPairs, readCatchup25RecruiterSummary, summarizeCatchup25Notes, mark25DayCatchupDone } = require('./statusTracker');
+      const filled = await isCatchup25SheetFilled(employee._auth, employee).catch(err => {
+        console.warn(`[Cron] Catchup25 sheet poll failed for ${name}: ${err.message}`);
+        return false;
+      });
+      const confirmed = isTaskDone(employee.checklist, 't64');
 
-    if (filled) {
-      stopped = true;
-      if (jobHandle) { try { jobHandle.stop(); } catch (_) {} }
+      if (filled && confirmed) {
+        const [qaResult, recruiterSummary] = await Promise.all([
+          readCatchup25QAPairs(employee._auth, employee.catchupSheetId).catch(() => null),
+          readCatchup25RecruiterSummary(employee._auth, employee.catchupSheetId).catch(() => ''),
+        ]);
+        const qaPairs = (qaResult && qaResult.qaPairs) || [];
+        const summaryText = await summarizeCatchup25Notes(employee, qaPairs, recruiterSummary);
 
-      const [qaResult, recruiterSummary] = await Promise.all([
-        readCatchup25QAPairs(employee._auth, employee.catchupSheetId).catch(() => null),
-        readCatchup25RecruiterSummary(employee._auth, employee.catchupSheetId).catch(() => ''),
-      ]);
-      const qaPairs = (qaResult && qaResult.qaPairs) || [];
-      const summaryText = await summarizeCatchup25Notes(employee, qaPairs, recruiterSummary);
+        const { send25DayCatchupSummary } = require('./emailSender');
+        const sent = await send25DayCatchupSummary(employee, summaryText).then(() => true).catch(err => {
+          console.warn(`[Cron] 25-day catchup summary email failed for ${name} — will retry next working day: ${err.message}`);
+          return false;
+        });
+        if (!sent) return;
+        console.log(`[Cron] 25-day catchup summary sent for ${name} (${employeeId})`);
 
-      const { send25DayCatchupSummary } = require('./emailSender');
-      await send25DayCatchupSummary(employee, summaryText).catch(err =>
-        console.warn(`[Cron] 25-day catchup summary email failed for ${name}: ${err.message}`)
+        if (markTaskFn) markTaskFn('t65'); // 25-day milestone complete — only after the summary email went out
+        await mark25DayCatchupDone(employee._auth, employee).catch(() => {});
+        if (employee._saveState) employee._saveState();
+        return stop();
+      }
+
+      const missing = [!filled && 'tracking sheet not filled', !confirmed && '"Confirmed" + screenshot reply not received'].filter(Boolean).join(', ');
+      if (!remind) {
+        console.log(`[Cron] 25-day catchup for ${name} still waiting: ${missing}`);
+        return;
+      }
+      // Same mail as the initial reminder
+      const { send25DayCatchupEmail } = require('./emailSender');
+      await send25DayCatchupEmail(employee, { eventDateStr }).catch(err =>
+        console.warn(`[Cron] 25-day catchup reminder failed for ${name}: ${err.message}`)
       );
-      console.log(`[Cron] 25-day catchup summary sent for ${name} (${employeeId})`);
-
-      if (markTaskFn) markTaskFn('t65'); // 25-day milestone marked complete in Checklist1
-      await mark25DayCatchupDone(employee._auth, employee).catch(() => {});
-      if (employee._saveState) employee._saveState();
-      return;
+      console.log(`[Cron] 25-day catchup reminder sent for ${name} (${employeeId}) — ${missing}`);
+    } finally {
+      running = false;
     }
-
-    // Not filled yet — remind the recruiter (same mail as the initial reminder)
-    const { send25DayCatchupEmail } = require('./emailSender');
-    await send25DayCatchupEmail(employee, { meetLink: employee.meetLinks && employee.meetLinks['25day-catchup'], eventDateStr }).catch(err =>
-      console.warn(`[Cron] 25-day catchup sheet reminder failed for ${name}: ${err.message}`)
-    );
-    console.log(`[Cron] 25-day catchup sheet reminder sent for ${name} (${employeeId})`);
   };
 
-  // First check 24h after the reminder email fires, then daily at 9 AM IST
-  const msDelay = 24 * 60 * 60 * 1000;
+  catchup25Checks[employeeId] = check;
+  // First check 24h after the reminder email (or straight away when resuming after a restart),
+  // then every day at 9 AM IST.
   setTimeout(async () => {
-    await check();
+    await check({ remind: firstCheckRemind && remindDaily });
     if (!stopped) {
-      jobHandle = cron.schedule('0 9 * * *', check, { timezone: config.timezone || 'Asia/Kolkata' });
+      jobHandle = cron.schedule('0 9 * * *', () => check({ remind: remindDaily }), { timezone: config.timezone || 'Asia/Kolkata' });
     }
-  }, msDelay);
+  }, initialDelayMs);
 
-  return {
-    stop() {
-      stopped = true;
-      if (jobHandle) { try { jobHandle.stop(); } catch (_) {} }
-    },
-  };
+  return { stop };
+}
+
+// Called when the recruiter's "Confirmed" + screenshot reply arrives: if the sheet is already
+// filled, the summary goes out now instead of at the next 9 AM check. Never sends a reminder.
+async function checkCatchup25Now(employee) {
+  const check = employee && catchup25Checks[employee.employeeId];
+  if (check) await check({ remind: false });
 }
 
 // Schedule the 30-day catchup call reminder
@@ -784,8 +808,16 @@ function restoreMilestonesAfterRestart(employee, contacts, completedMilestones, 
   if (!done.has('t63')) {
     const t = scheduleActionOnce(employee, '25day', () => schedule25DayCatchup(employee, markTaskFn));
     if (t) tasks.push(t);
+  } else if (!done.has('t65')) {
+    // Reminder already sent before the restart — resume the daily check (sheet + "Confirmed" reply)
+    // First check now but without a reminder (never remind at restart time); daily reminders
+    // resume only if the call was within the last 14 days — no reminders for long-past calls.
+    const eventDate = ensureWorkingDay(addDays(new Date(employee.doj), config.milestones.surveyday));
+    const recent = Date.now() - eventDate.getTime() <= 14 * 24 * 60 * 60 * 1000;
+    scheduleCatchup25SheetPoller(employee, formatCatchup25Date(eventDate), markTaskFn, { initialDelayMs: 0, firstCheckRemind: false, remind: recent });
+    console.log(`[Cron]   Resuming 25-day catchup check for ${name} (t63 done, t65 pending)${recent ? '' : ' — call was over 14 days ago, no reminders'}`);
   } else {
-    console.log(`[Cron]   Skipping 25-day catchup (t63 already done)`);
+    console.log(`[Cron]   Skipping 25-day catchup (t65 already done)`);
   }
 
   if (!done.has('t43')) {
@@ -1033,6 +1065,7 @@ module.exports = {
   scheduleReplyDeadline,
   restoreMilestonesAfterRestart,
   schedule25DayCatchup,
+  checkCatchup25Now,
   schedule30DayCatchup,
   schedule60DayReview,
   schedule90DayReview,

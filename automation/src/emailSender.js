@@ -916,21 +916,15 @@ async function sendOnboardingSurveyResponseToRecruiter(employee, responseUrl, xl
 async function send25DayCatchupEmail(employee, calendarLinks = {}) {
   const { name, employeeId, doj, isFresher } = employee;
   const co = esc(process.env.COMPANY_NAME || '');
-  const hrEmailAddr = resolveHrEmail(employee);
-  const recruiterEmail = (employee.contacts || {}).recruiterEmail || '';
-  const toEmail = [hrEmailAddr, recruiterEmail].filter(Boolean).join(', ');
+  // HR spec: recruiter only. HR gets it only if no recruiter is on record, so it isn't lost.
+  const toEmail = (employee.contacts || {}).recruiterEmail || resolveHrEmail(employee);
+  if (!toEmail) return;
   const sheetLink = (await resolveCatchupSheetUrl(employee)) || process.env.CATCHUP_TRACKING_SHEET_LINK || '#';
-  const meetLink = calendarLinks.meetLink || (employee.meetLinks && employee.meetLinks['25day-catchup']) || null;
   const contacts = employee.contacts || {};
   const managerEmail = contacts.managerEmail || '';
   const managerName  = contacts.managerName  || managerEmail;
-  const location     = employee.officeLocation || '';
-  const assetRequired = employee.assetRequired || '';
   const fresherLabel  = isFresher ? 'Yes (Fresher)' : 'No (Experienced)';
 
-  const meetSection = meetLink
-    ? `<p style="margin:16px 0;"><a href="${meetLink}" style="background:#0F9D58;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;display:inline-block;">Join Google Meet</a></p>`
-    : '';
   const scheduledOnSection = calendarLinks.eventDateStr
     ? ` was scheduled on <strong>${esc(calendarLinks.eventDateStr)}</strong>.`
     : '.';
@@ -948,13 +942,10 @@ async function send25DayCatchupEmail(employee, calendarLinks = {}) {
         <tr><td style="padding:4px 12px 4px 0;color:#555;"><strong>Official Email</strong></td><td>${esc(employee.officialEmail || employee.personalEmail || '')}</td></tr>
         <tr><td style="padding:4px 12px 4px 0;color:#555;"><strong>Reporting Manager</strong></td><td>${esc(managerName)}</td></tr>
         <tr><td style="padding:4px 12px 4px 0;color:#555;"><strong>Manager Email</strong></td><td>${esc(managerEmail)}</td></tr>
-        <tr><td style="padding:4px 12px 4px 0;color:#555;"><strong>Location</strong></td><td>${esc(location)}</td></tr>
-        <tr><td style="padding:4px 12px 4px 0;color:#555;"><strong>Asset Required</strong></td><td>${esc(assetRequired)}</td></tr>
         <tr><td style="padding:4px 12px 4px 0;color:#555;"><strong>Fresher</strong></td><td>${esc(fresherLabel)}</td></tr>
       </table>
       <br/>
       <p>Recruiter — please fill in the <a href="${sheetLink}">catchup tracking sheet</a> after the call.</p>
-      ${meetSection}
       <p>Since you have completed the call and the catchup tracking sheet is filled, reply to this email with <strong>"Confirmed"</strong> and upload a screenshot of the meeting (as an attachment on this reply) to mark this activity as completed.</p>
       <p>Regards,<br/>${co} HR</p>
     `,

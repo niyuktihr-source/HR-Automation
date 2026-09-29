@@ -38,6 +38,7 @@ const {
   scheduleDocumentReminders,
   scheduleReplyDeadline,
   restoreMilestonesAfterRestart,
+  checkCatchup25Now,
   startDailyHealthCheck,
   startDataRetentionCron,
   cancelAllJobs,
@@ -1751,8 +1752,12 @@ async function handleReply(auth, classified, rawMsg) {
       }
 
       markAndLog(employee, 't64');
-      activityLog.log(employee, '25_day_catchup_complete');
+      activityLog.log(employee, '25_day_catchup_confirmed');
       console.log(`[Index] 25-day catchup confirmed (with screenshot) for ${employee.name}`);
+      saveState(employee.employeeId, snapshotEmployee(employee));
+      // If the tracking sheet is already filled, send the summary now rather than at the next check
+      await checkCatchup25Now(employee).catch(err =>
+        console.warn(`[Index] 25-day catchup check after "Confirmed" failed for ${employee.name}: ${err.message}`));
       break;
     }
 
