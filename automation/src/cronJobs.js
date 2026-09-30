@@ -144,6 +144,21 @@ function scheduleOnceAtIST(targetDate, hour, minute, label, fn, { ifPast = 'run'
   return task;
 }
 
+// IST calendar date ('YYYY-MM-DD') of a moment.
+function istDayKey(date = new Date()) {
+  return new Date(new Date(date).getTime() + 330 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+// Runs `check` every day at 9 AM IST — the one daily reminder slot. skipDay (an IST date key):
+// no check on that day — the day the email that started this poller went out — so the first
+// reminder is the next day's 9 AM, never a second email the same day.
+function startDaily9amCheck(check, { skipDay = null } = {}) {
+  return cron.schedule('0 9 * * *', () => {
+    if (skipDay && istDayKey() === skipDay) return;
+    return check();
+  }, { timezone: config.timezone || 'Asia/Kolkata' });
+}
+
 // Formats an event Date + hour/minute config into "23 Sep 2026 at 11:00 AM IST"
 function formatEventDateStr(eventDate, hour, minute) {
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -159,14 +174,14 @@ function scheduleDayBeforeReminder(employee, dayMark, fireDate) {
   const { name } = employee;
   const milestoneDate = new Date(fireDate);
   const reminderDate = previousWorkingDay(milestoneDate);
-  if (reminderDate <= new Date()) return null; // already past — skip
-  return scheduleOnce(reminderDate, `Day-Before Reminder (${dayMark}-day) — ${name}`, async () => {
+  const { hour, minute } = config.emailSendTime;
+  return scheduleOnceAtIST(reminderDate, hour, minute, `Day-Before Reminder (${dayMark}-day) — ${name}`, async () => {
     const { sendDayBeforeReminder } = require('./emailSender');
     await sendDayBeforeReminder(employee, dayMark, milestoneDate).catch(err =>
       console.warn(`[Cron] Day-before reminder (${dayMark}-day) failed for ${name}: ${err.message}`)
     );
     console.log(`[Cron] Day-before reminder sent for ${name} — ${dayMark}-day milestone on ${milestoneDate.toDateString()}`);
-  });
+  }, { ifPast: 'skip' }); // heads-up time already passed — skip
 }
 
 // Schedule the day-23 onboarding survey: creates the joinee's own copy of "Employee Feedback
@@ -191,7 +206,7 @@ function scheduleOnboardingSurveyForm(employee, markTaskFn) {
     if (!form || !form.responderUrl) {
       const retryDate = ensureWorkingDay(addDays(new Date(), 1));
       console.warn(`[Cron] Onboarding survey for ${name} not sent — retrying ${retryDate.toDateString()} 9:00 AM IST`);
-      scheduleOnceAtIST(retryDate, 9, 0, `Onboarding Survey Form (retry) — ${name}`, send);
+      scheduleOnceAtIST(retryDate, config.emailSendTime.hour, config.emailSendTime.minute, `Onboarding Survey Form (retry) — ${name}`, send);
       return;
     }
 
@@ -207,17 +222,17 @@ function scheduleOnboardingSurveyForm(employee, markTaskFn) {
     if (markTaskFn) markTaskFn('t70');
     if (employee._saveState) employee._saveState();
 
-    scheduleOnboardingSurveyPoller(employee, markTaskFn);
+    scheduleOnboardingSurveyPoller(employee, markTaskFn, { skipDay: istDayKey() }); // first reminder: tomorrow 9 AM
   };
 
-  return scheduleOnce(fireDate, `Onboarding Survey Form — ${name}`, send);
+  return scheduleOnceAtIST(fireDate, config.emailSendTime.hour, config.emailSendTime.minute, `Onboarding Survey Form — ${name}`, send);
 }
 
 // Polls daily (starting 24h after the survey was sent) for a completed response.
 // Once every field is filled, copies the joinee's individual answers into their
 // Drive folder, shares that copy with their recruiter, and marks the milestone done.
 // Stops once t71 is marked done or the employee is stopped.
-function scheduleOnboardingSurveyPoller(employee, markTaskFn) {
+function scheduleOnboardingSurveyPoller(employee, markTaskFn, { skipDay = null } = {}) {
   const { name, employeeId } = employee;
   let jobHandle = null;
   let stopped = false;
@@ -276,13 +291,8 @@ function scheduleOnboardingSurveyPoller(employee, markTaskFn) {
     console.log(`[Cron] Onboarding survey reminder sent for ${name} (${employeeId})`);
   };
 
-  const msDelay = 24 * 60 * 60 * 1000;
-  setTimeout(async () => {
-    await check();
-    if (!stopped) {
-      jobHandle = cron.schedule('0 9 * * *', check, { timezone: config.timezone || 'Asia/Kolkata' });
-    }
-  }, msDelay);
+  // One reminder a day at 9 AM IST — none on the day the form was sent
+  jobHandle = startDaily9amCheck(check, { skipDay });
 
   return {
     stop() {
@@ -372,10 +382,10 @@ function schedule25DayCatchupReminder(employee, eventDate, markTaskFn) {
 // is sent is the milestone marked complete (t65) — a failed send is retried next working day.
 const catchup25Checks = {}; // employeeId → check(), so a "Confirmed" reply can trigger it straight away
 
-// Options (used when resuming after a restart): initialDelayMs — when the first check runs;
+// Options (used when resuming after a restart): initialDelayMs: 0 — check straight away;
 // firstCheckRemind — whether that first check may send a reminder; remind — false keeps the
 // poller silent (summary still sent once both are in) for a call long in the past.
-function scheduleCatchup25SheetPoller(employee, eventDateStr, markTaskFn, { initialDelayMs = 24 * 60 * 60 * 1000, firstCheckRemind = true, remind: remindDaily = true } = {}) {
+function scheduleCatchup25SheetPoller(employee, eventDateStr, markTaskFn, { initialDelayMs = null, firstCheckRemind = true, remind: remindDaily = true } = {}) {
   const { name, employeeId } = employee;
   let jobHandle = null;
   let stopped = false;
@@ -440,14 +450,10 @@ function scheduleCatchup25SheetPoller(employee, eventDateStr, markTaskFn, { init
   };
 
   catchup25Checks[employeeId] = check;
-  // First check 24h after the reminder email (or straight away when resuming after a restart),
-  // then every day at 9 AM IST.
-  setTimeout(async () => {
-    await check({ remind: firstCheckRemind && remindDaily });
-    if (!stopped) {
-      jobHandle = cron.schedule('0 9 * * *', () => check({ remind: remindDaily }), { timezone: config.timezone || 'Asia/Kolkata' });
-    }
-  }, initialDelayMs);
+  // Resuming after a restart: check straight away (quietly unless told otherwise). Otherwise the
+  // reminder email went out today — the daily 9 AM IST check starts tomorrow.
+  if (initialDelayMs === 0) check({ remind: firstCheckRemind && remindDaily }).catch(err => console.warn(`[Cron] 25-day catchup check failed for ${name}: ${err.message}`));
+  jobHandle = startDaily9amCheck(() => check({ remind: remindDaily }), { skipDay: initialDelayMs === 0 ? null : istDayKey() });
 
   return { stop };
 }
@@ -624,7 +630,7 @@ function schedule5MonthProbation(employee, managerEmail) {
   const { name, employeeId, doj } = employee;
   const fireDate = ensureWorkingDay(addDays(new Date(doj), config.milestones.probation150day));
 
-  return scheduleOnce(fireDate, `Pre-Probation — ${name}`, async () => {
+  return scheduleOnceAtIST(fireDate, config.emailSendTime.hour, config.emailSendTime.minute, `Pre-Probation — ${name}`, async () => {
     await sendPreProbationReminder(employee, managerEmail);
     console.log(`[Cron] Pre-probation reminder sent for ${name} (${employeeId})`);
     // t52 and t55 are marked only when HR replies with the result (handleReply → pre_probation_result)
@@ -977,13 +983,8 @@ function scheduleRecruiterSheetPoller(employee, recruiterEmail, managerEmail, da
     console.log(`[Cron] ${dayMark}-day review sheet reminder sent for ${name} — pending: ${[!sections.recruiterFilled && 'recruiter', !sections.managerFilled && 'manager'].filter(Boolean).join(' + ')}`);
   };
 
-  // First check 24h after the review call is set up, then every day at 9 AM IST
-  setTimeout(async () => {
-    await check();
-    if (!stopped) {
-      jobHandle = cron.schedule('0 9 * * *', check, { timezone: config.timezone || 'Asia/Kolkata' });
-    }
-  }, 24 * 60 * 60 * 1000);
+  // Every day at 9 AM IST, starting the day after the review call
+  jobHandle = startDaily9amCheck(check, { skipDay: istDayKey(eventDate || new Date()) });
 
   return { stop };
 }
@@ -1023,13 +1024,8 @@ function scheduleManagerSheetReminder(employee, managerEmail, sheetUrl, label, s
     }).catch(err => console.warn(`[Cron] Manager sheet reminder email failed for ${name}: ${err.message}`));
   };
 
-  const msDelay = 24 * 60 * 60 * 1000;
-  setTimeout(async () => {
-    await check();
-    if (!stopped) {
-      jobHandle = cron.schedule('0 9 * * *', check, { timezone: config.timezone || 'Asia/Kolkata' });
-    }
-  }, msDelay);
+  // Every day at 9 AM IST, starting tomorrow
+  jobHandle = startDaily9amCheck(check, { skipDay: istDayKey() });
 
   return {
     stop() {

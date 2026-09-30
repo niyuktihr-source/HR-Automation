@@ -23,6 +23,11 @@ module.exports = {
     reviewNoReplyHours: 48,   // escalate if review confirmation doesn't arrive
   },
 
+  // ─── Time of day (IST) for scheduled emails not tied to a same-day call ──────
+  // Day-23 survey, day-before heads-ups (25-day joinee, day 29/59/89 check-ins), pre-probation.
+  // Call-day invite setups stay early so invites arrive well before the call.
+  emailSendTime: { hour: 10, minute: 0 },
+
   // ─── 30/60/90-day review summary-sharing step ──────────────────────────────
   // Days after the review call before asking the recruiter to confirm they've
   // shared the review summary with the new joinee (Step 4/5 of HR's spec).
