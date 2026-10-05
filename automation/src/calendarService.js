@@ -88,8 +88,9 @@ function isDuplicateCalendarAction(employee, actionKey) {
   const key = String(actionKey);
 
   const taskMap = {
-    'hr-induction': 't28',
-    'project-intro': 't32',
+    // hr-induction (t28) and project-intro (t32) are deliberately NOT mapped: index.js marks
+    // them done before creating the event (restart safety), so mapping them would skip every
+    // invite. insertCalendarEvent's deterministic event ID already prevents duplicates.
     '25day-catchup': 't65',
     '30day-catchup': 't45',
     '60day-review': 't48',
