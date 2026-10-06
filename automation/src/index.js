@@ -844,7 +844,12 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
     docType = await detectDocType(auth, file.id, file.name, file.mimeType, subfolderHint);
   } catch (err) {
     releaseFileLock();
-    console.error(`[Index] detectDocType failed for ${file.name}:`, err.message);
+    if (err.serviceUnavailable) {
+      // Gemini/Drive is temporarily down — no email, file not marked processed; the poller retries it
+      console.warn(`[Index] Could not identify ${file.name} — Gemini/Drive temporarily unavailable, will retry (no email sent): ${err.message}`);
+    } else {
+      console.error(`[Index] detectDocType failed for ${file.name}:`, err.message);
+    }
     return false;
   }
   if (!docType && docsLocked(employee)) {
@@ -892,8 +897,13 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
   try {
     result = await verifyDocument(auth, file.id, file.name, file.mimeType, subfolderHint);
   } catch (err) {
-    console.error(`[Index] verifyDocument failed for ${file.name}:`, err.message);
-    activityLog.log(employee, 'verification_error', `${file.name} — ${err.message}`);
+    if (err.serviceUnavailable) {
+      // Temporary outage — retried by the poller on the next pass; no email and no activity-log spam
+      console.warn(`[Index] Could not verify ${file.name} — Gemini/Drive temporarily unavailable, will retry (no email sent): ${err.message}`);
+    } else {
+      console.error(`[Index] verifyDocument failed for ${file.name}:`, err.message);
+      activityLog.log(employee, 'verification_error', `${file.name} — ${err.message}`);
+    }
     releaseFileLock();
     return false; // signal caller to remove from seen-files so it can be retried
   }

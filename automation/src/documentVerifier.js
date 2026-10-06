@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const config = require('./config');
+const { isTransientServiceError, retryTransient } = require('./transientError');
 
 // Lazy — only instantiated when GEMINI_API_KEY is present, so module load never crashes
 let _genAI = null;
@@ -463,6 +464,13 @@ Respond with null docType if the document does not match any of the above.`,
     }
     return null;
   } catch (err) {
+    // Gemini/Drive being temporarily down says nothing about the document — don't fall through
+    // to "unknown type" (which emails the joinee); let the caller retry the file later.
+    if (isTransientServiceError(err)) {
+      err.serviceUnavailable = true;
+      console.warn(`[Verify] Content-based doc type detection hit a temporary outage: ${err.message}`);
+      throw err;
+    }
     console.warn(`[Verify] Content-based doc type detection failed: ${err.message}`);
     return null;
   } finally {
@@ -557,30 +565,11 @@ function fileToBase64(filePath, mimeType) {
   return { base64, mediaType };
 }
 
-// Retry helper for Gemini quota / rate-limit errors (429 / RESOURCE_EXHAUSTED)
-async function callWithRetry(fn, maxRetries = 4) {
-  let delay = 10000; // start at 10s
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      const is429 = err.message && (
-        err.message.includes('429') ||
-        err.message.includes('quota') ||
-        err.message.includes('RESOURCE_EXHAUSTED')
-      );
-      if (is429 && attempt < maxRetries) {
-        // Try to parse retryDelay from error message
-        const retryMatch = err.message.match(/"retryDelay":"(\d+)s"/);
-        const waitMs = retryMatch ? parseInt(retryMatch[1]) * 1000 + 2000 : delay;
-        console.warn(`[Gemini] Quota hit — waiting ${Math.round(waitMs / 1000)}s before retry ${attempt}/${maxRetries}`);
-        await new Promise(r => setTimeout(r, waitMs));
-        delay *= 2;
-      } else {
-        throw err;
-      }
-    }
-  }
+// Retry helper for temporary Gemini trouble: quota / rate limits (429) and outages
+// (503 "high demand", 500/502/504, network errors). If it still fails after the retries the
+// error is flagged serviceUnavailable so callers retry the file later instead of rejecting it.
+function callWithRetry(fn, maxRetries = 4) {
+  return retryTransient(fn, { maxRetries, label: 'Gemini' });
 }
 
 // Core verification function — returns { valid, docType, checks, failureReasons, summary }

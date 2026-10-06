@@ -13,6 +13,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const fs = require('fs');
 const path = require('path');
 const config = require('./config');
+const { retryTransient } = require('./transientError');
 
 const escHtml = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
@@ -189,29 +190,9 @@ async function fetchMessageBody(auth, messageId) {
   };
 }
 
-// Retry helper for Gemini quota / rate-limit errors (429 / RESOURCE_EXHAUSTED)
-async function callWithRetry(fn, maxRetries = 4) {
-  let delay = 10000; // start at 10s
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      const is429 = err.message && (
-        err.message.includes('429') ||
-        err.message.includes('quota') ||
-        err.message.includes('RESOURCE_EXHAUSTED')
-      );
-      if (is429 && attempt < maxRetries) {
-        const retryMatch = err.message.match(/"retryDelay":"(\d+)s"/);
-        const waitMs = retryMatch ? parseInt(retryMatch[1]) * 1000 + 2000 : delay;
-        console.warn(`[Gemini] Quota hit — waiting ${Math.round(waitMs / 1000)}s before retry ${attempt}/${maxRetries}`);
-        await new Promise(r => setTimeout(r, waitMs));
-        delay *= 2;
-      } else {
-        throw err;
-      }
-    }
-  }
+// Retry helper for temporary Gemini trouble (429 / quota and 503 / 5xx outages / network errors)
+function callWithRetry(fn, maxRetries = 4) {
+  return retryTransient(fn, { maxRetries, label: 'Gemini' });
 }
 
 // ─── Classify reply with Gemini ───────────────────────────────────────────────
@@ -380,6 +361,149 @@ async function markAsRead(auth, messageId) {
 const processedMessageIds = new Set();
 const processingLocks = new Set(); // IDs currently being processed (in-flight)
 
+// Handles ONE incoming message end to end (STOP command, or Gemini classification + dispatch).
+// Throws on failure; a Gemini outage that outlasts the in-call retries is flagged err.serviceUnavailable.
+async function processOneMessage(auth, messageId, onReplyClassified) {
+  const full = await fetchMessageBody(auth, messageId);
+
+  // ── STOP automation command — deterministic, no Gemini needed ────────────
+  // Authorized sender: hr@alethea.in
+  // Subject can be in any natural form — all of the following work:
+  //   "EMP0475 STOP ONBOARDING"
+  //   "STOP ONBOARDING EMP0475"
+  //   "EMP0475 no join"
+  //   "stop case EMP0475"
+  //   "cancel onboarding EMP0475"
+  //   "EMP0475 candidate did not join"
+  // This fires BEFORE Gemini so it is instant, reliable, and costs no quota.
+  const STOP_AUTHORIZED_SENDER = 'hr@alethea.in';
+  const STOP_KEYWORDS = /\b(stop|cancel|no.?join|did.?not.?join|not.?joining|drop(?:ped)?(?:.?out)?|withdraw|left|induction.?stop|stop.?case|stop.?onboarding|onboarding.?stop)\b/i;
+  // Extract employee ID (EMP followed by alphanumerics) from subject or body
+  const subjectAndBody = full.subject + ' ' + (full.body || '');
+  const empIdMatch = subjectAndBody.match(/\bEMP[A-Z0-9]+\b/i);
+  const fromRaw = full.from || '';
+  const fromEmail = fromRaw.toLowerCase().replace(/.*<([^>]+)>.*/, '$1').trim()
+                    || fromRaw.toLowerCase().trim();
+
+  const isStopEmail = fromEmail === STOP_AUTHORIZED_SENDER
+                      && STOP_KEYWORDS.test(full.subject)
+                      && empIdMatch;
+
+  if (isStopEmail) {
+    const empId = empIdMatch[0].toUpperCase();
+    console.log(`[Gmail] ⛔ Stop onboarding email detected — Employee: ${empId}, Sender: ${fromEmail}, Subject: "${full.subject}"`);
+    await markAsRead(auth, messageId).catch(() => {});
+    await onReplyClassified(
+      {
+        isOnboardingReply: true,
+        replyType: 'candidate_no_join',
+        employeeId: empId,
+        data: {
+          notes: `STOP automation command received via email from ${fromEmail} — Subject: "${full.subject}"`,
+        },
+        confidence: 'high',
+      },
+      full
+    );
+    // Skip Gemini classification for this message — already handled above
+    return;
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
+  const classified = await classifyReply(full);
+  if (classified && classified.confidence === 'low') {
+    console.warn(`[Gmail] Low-confidence reply dropped — from: ${full.from}, subject: ${full.subject}`);
+    // Mark as read first so this message is never re-fetched on next push
+    await markAsRead(auth, messageId).catch(() => {});
+    // Alert HR so the reply isn't silently lost
+    const { sendEmail } = require('./emailSender');
+    await sendEmail({
+      to: process.env.HR_EMAIL,
+      subject: `HR Automation — Unclassified Reply Received`,
+      html: `
+        <p>Hi HR Team,</p>
+        <p>An email reply was received that the automation could not confidently classify. Please review it manually:</p>
+        <ul>
+          <li><strong>From:</strong> ${full.from}</li>
+          <li><strong>Subject:</strong> ${full.subject}</li>
+        </ul>
+        <blockquote style="border-left:4px solid #ffa000;padding:8px 16px;background:#fffde7;color:#555;">${escHtml((full.body || '').slice(0, 500))}</blockquote>
+        <p>If this is an onboarding reply, you can manually mark the relevant task via the status dashboard.</p>
+        <p>Regards,<br/>${process.env.COMPANY_NAME} HR Automation</p>
+      `,
+    }).catch(err => console.warn('[Gmail] Could not send low-confidence alert to HR:', err.message));
+  } else if (classified) {
+    await onReplyClassified(classified, full);
+    await markAsRead(auth, messageId);
+  }
+}
+
+// ─── Gemini-outage retries ────────────────────────────────────────────────────
+// If Gemini is down when a reply arrives, the message is NOT marked read and not dropped: it is
+// re-processed every RETRY_DELAY_MS, up to MAX_RETRIES times (~25 min). Only then is it marked read
+// and HR alerted, so it can never vanish silently. (In-memory — a restart forgets pending retries,
+// but the message stays unread in the inbox.)
+const RETRY_DELAY_MS = 3 * 60 * 1000;
+const MAX_RETRIES = 8;
+const retryAttempts = new Map(); // messageId -> attempts so far
+
+async function alertHrGaveUp(auth, messageId) {
+  let from = 'unknown', subject = 'unknown';
+  try { const full = await fetchMessageBody(auth, messageId); from = full.from; subject = full.subject; } catch (_) {}
+  try {
+    const { sendEmail } = require('./emailSender');
+    await sendEmail({
+      to: process.env.HR_EMAIL,
+      subject: `HR Automation — Reply Not Processed (Gemini unavailable)`,
+      html: `
+        <p>Hi HR Team,</p>
+        <p>An email reply could not be read by the automation because Gemini stayed unavailable after ${MAX_RETRIES} retries. Please handle it manually:</p>
+        <ul>
+          <li><strong>From:</strong> ${escHtml(from)}</li>
+          <li><strong>Subject:</strong> ${escHtml(subject)}</li>
+        </ul>
+        <p>If it is an onboarding reply, you can manually mark the relevant task via the status dashboard.</p>
+        <p>Regards,<br/>${process.env.COMPANY_NAME} HR Automation</p>
+      `,
+    });
+  } catch (err) {
+    console.warn('[Gmail] Could not send gave-up alert to HR:', err.message);
+  }
+}
+
+// Called when processing a message failed. Schedules a retry for a temporary Gemini outage;
+// any other error keeps the old behaviour (log + mark read).
+async function handleProcessingError(auth, messageId, err, onReplyClassified) {
+  if (!err.serviceUnavailable) {
+    console.error(`[Gmail] Error processing message ${messageId}:`, err.message);
+    await markAsRead(auth, messageId).catch(() => {});
+    return;
+  }
+  const attempts = retryAttempts.get(messageId) || 0;
+  if (attempts >= MAX_RETRIES) {
+    retryAttempts.delete(messageId);
+    console.error(`[Gmail] Giving up on message ${messageId} after ${attempts} retries — Gemini still unavailable`);
+    await markAsRead(auth, messageId).catch(() => {});
+    await alertHrGaveUp(auth, messageId);
+    return;
+  }
+  retryAttempts.set(messageId, attempts + 1);
+  console.warn(`[Gmail] Gemini unavailable — message ${messageId} left unread, retry ${attempts + 1}/${MAX_RETRIES} in ${Math.round(RETRY_DELAY_MS / 60000)} min`);
+  const timer = setTimeout(async () => {
+    if (processingLocks.has(messageId)) return;
+    processingLocks.add(messageId);
+    try {
+      await processOneMessage(auth, messageId, onReplyClassified);
+      retryAttempts.delete(messageId);
+    } catch (e) {
+      await handleProcessingError(auth, messageId, e, onReplyClassified);
+    } finally {
+      processingLocks.delete(messageId);
+    }
+  }, RETRY_DELAY_MS);
+  if (timer && timer.unref) timer.unref();
+}
+
 // ─── Main entry point called by webhookServer when a Gmail push arrives ───────
 // `onReplyClassified` is a callback: (classified) => void
 async function processGmailPush(auth, pushData, onReplyClassified) {
@@ -429,7 +553,11 @@ async function processGmailPush(auth, pushData, onReplyClassified) {
           await markAsRead(auth, msg.id).catch(() => {});
         }
       } catch (err) {
-        console.error(`[Gmail] Fallback: error processing message ${msg.id}:`, err.message);
+        if (err.serviceUnavailable) {
+          await handleProcessingError(auth, msg.id, err, onReplyClassified);
+        } else {
+          console.error(`[Gmail] Fallback: error processing message ${msg.id}:`, err.message);
+        }
       } finally {
         processingLocks.delete(msg.id);
       }
@@ -450,83 +578,9 @@ async function processGmailPush(auth, pushData, onReplyClassified) {
     processedMessageIds.add(msg.id);
     processingLocks.add(msg.id);
     try {
-      const full = await fetchMessageBody(auth, msg.id);
-
-      // ── STOP automation command — deterministic, no Gemini needed ────────────
-      // Authorized sender: hr@alethea.in
-      // Subject can be in any natural form — all of the following work:
-      //   "EMP0475 STOP ONBOARDING"
-      //   "STOP ONBOARDING EMP0475"
-      //   "EMP0475 no join"
-      //   "stop case EMP0475"
-      //   "cancel onboarding EMP0475"
-      //   "EMP0475 candidate did not join"
-      // This fires BEFORE Gemini so it is instant, reliable, and costs no quota.
-      const STOP_AUTHORIZED_SENDER = 'hr@alethea.in';
-      const STOP_KEYWORDS = /\b(stop|cancel|no.?join|did.?not.?join|not.?joining|drop(?:ped)?(?:.?out)?|withdraw|left|induction.?stop|stop.?case|stop.?onboarding|onboarding.?stop)\b/i;
-      // Extract employee ID (EMP followed by alphanumerics) from subject or body
-      const subjectAndBody = full.subject + ' ' + (full.body || '');
-      const empIdMatch = subjectAndBody.match(/\bEMP[A-Z0-9]+\b/i);
-      const fromRaw = full.from || '';
-      const fromEmail = fromRaw.toLowerCase().replace(/.*<([^>]+)>.*/, '$1').trim()
-                        || fromRaw.toLowerCase().trim();
-
-      const isStopEmail = fromEmail === STOP_AUTHORIZED_SENDER
-                          && STOP_KEYWORDS.test(full.subject)
-                          && empIdMatch;
-
-      if (isStopEmail) {
-        const empId = empIdMatch[0].toUpperCase();
-        console.log(`[Gmail] ⛔ Stop onboarding email detected — Employee: ${empId}, Sender: ${fromEmail}, Subject: "${full.subject}"`);
-        await markAsRead(auth, msg.id).catch(() => {});
-        await onReplyClassified(
-          {
-            isOnboardingReply: true,
-            replyType: 'candidate_no_join',
-            employeeId: empId,
-            data: {
-              notes: `STOP automation command received via email from ${fromEmail} — Subject: "${full.subject}"`,
-            },
-            confidence: 'high',
-          },
-          full
-        );
-        // Skip Gemini classification for this message — already handled above
-        processingLocks.delete(msg.id);
-        await new Promise(r => setTimeout(r, 500));
-        continue;
-      }
-      // ─────────────────────────────────────────────────────────────────────────
-
-      const classified = await classifyReply(full);
-      if (classified && classified.confidence === 'low') {
-        console.warn(`[Gmail] Low-confidence reply dropped — from: ${full.from}, subject: ${full.subject}`);
-        // Mark as read first so this message is never re-fetched on next push
-        await markAsRead(auth, msg.id).catch(() => {});
-        // Alert HR so the reply isn't silently lost
-        const { sendEmail } = require('./emailSender');
-        await sendEmail({
-          to: process.env.HR_EMAIL,
-          subject: `HR Automation — Unclassified Reply Received`,
-          html: `
-            <p>Hi HR Team,</p>
-            <p>An email reply was received that the automation could not confidently classify. Please review it manually:</p>
-            <ul>
-              <li><strong>From:</strong> ${full.from}</li>
-              <li><strong>Subject:</strong> ${full.subject}</li>
-            </ul>
-            <blockquote style="border-left:4px solid #ffa000;padding:8px 16px;background:#fffde7;color:#555;">${escHtml((full.body || '').slice(0, 500))}</blockquote>
-            <p>If this is an onboarding reply, you can manually mark the relevant task via the status dashboard.</p>
-            <p>Regards,<br/>${process.env.COMPANY_NAME} HR Automation</p>
-          `,
-        }).catch(err => console.warn('[Gmail] Could not send low-confidence alert to HR:', err.message));
-      } else if (classified) {
-        await onReplyClassified(classified, full);
-        await markAsRead(auth, msg.id);
-      }
+      await processOneMessage(auth, msg.id, onReplyClassified);
     } catch (err) {
-      console.error(`[Gmail] Error processing message ${msg.id}:`, err.message);
-      await markAsRead(auth, msg.id).catch(() => {});
+      await handleProcessingError(auth, msg.id, err, onReplyClassified);
     } finally {
       processingLocks.delete(msg.id);
     }
