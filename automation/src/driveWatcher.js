@@ -171,7 +171,7 @@ async function uploadInstructions(auth, folderId, employeeName) {
     `   → Name the file with "current_address"  e.g. current_address_john.pdf`,
     ``,
     `9. Permanent Address Proof (your hometown address)`,
-    `   → Accepted: Aadhaar card only`,
+    `   → Accepted: Aadhaar card, electricity bill, rental agreement, rent receipt`,
     `   → Upload into the "Permanent_Address_Proof" folder`,
     `   → Name the file with "permanent_address"  e.g. permanent_address_john.pdf`,
     ``,

@@ -3,11 +3,12 @@ const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>
 const config = require('./config');
 const { encrypt, decrypt, isEncryptionEnabled } = require('./encryption');
 const { getAuthClient, watchFolder, watchFolderPolling, scaffoldEmployeeFolder, lockEmployeeFolder, uploadChecklist, uploadInstructions, listFolderFiles } = require('./driveWatcher');
-const { verifyDocument, detectDocType, extractDocumentData, crossCheckDocuments } = require('./documentVerifier');
+const { verifyDocument, detectDocType, extractDocumentData, crossCheckDocuments, downloadDriveFile } = require('./documentVerifier');
 const {
   sendEmail,
   sendPreOnboardingForm,
   sendDocumentRejection,
+  sendExitMailApprovalRequest,
   sendNoResponseAlert,
   sendNoJoinNotification,
   sendOnboardingStoppedNotification,
@@ -192,6 +193,7 @@ function snapshotEmployee(employee) {
     reviewSummarySentAt: employee.reviewSummarySentAt || {}, // { 30|60|90: ISO time the summary was emailed to the joinee }
     meetLinks: employee.meetLinks || {},
     verificationResults: employee.verificationResults || {},
+    exitMailApprovals: employee.exitMailApprovals || {}, // { relievingLetter: { status: 'pending'|'approved'|'declined', ... } }
     extractedData: employee.extractedData || {},
     processedFileIds: Array.from(employee.processedFileIds || []),
     replyTimerExpiry,
@@ -286,6 +288,7 @@ function loadEmployees() {
         projectIntroSheetId: saved ? (saved.projectIntroSheetId || null) : null,
         employeeInfoSheetId: saved ? (saved.employeeInfoSheetId || null) : null,
         verificationResults: saved ? (saved.verificationResults || {}) : {},
+        exitMailApprovals: saved ? (saved.exitMailApprovals || {}) : {},
         extractedData: saved ? (saved.extractedData || {}) : {},
         processedFileIds: new Set(saved && saved.processedFileIds ? saved.processedFileIds : []),
         replyTimerExpiry: saved ? (saved.replyTimerExpiry || {}) : {},
@@ -343,7 +346,7 @@ function buildDefaultChecklist() {
         t61: { label: 'Graduation degree certificate verified', done: false },
         t62: { label: 'Post graduation certificate verified (or marked N/A — not applicable)', done: false },
         t67: { label: 'Current address proof verified (PG rent slip / wifi bill / electricity bill / rent agreement)', done: false },
-        t68: { label: 'Permanent address proof verified (Aadhaar / utility bill / rental agreement)', done: false },
+        t68: { label: 'Permanent address proof verified (Aadhaar / electricity bill / rental agreement / rent receipt)', done: false },
         t69: { label: 'UAN verified (Universal Account Number — uploaded within 3 days of DOJ)', done: false },
         t12: { label: 'Document verification marked complete in Checklist1', done: false },
         t14: { label: 'Mail sent to HR to create official email ID and greythr login', done: false },
@@ -569,6 +572,102 @@ const DOC_TASK_MAP = {
 // Optional documents — auto-marked N/A if not uploaded within grace period
 const OPTIONAL_DOCS = new Set(['payslip', 'postgradCertificate']);
 
+// Documents every joinee must have verified before onboarding documents are considered
+// complete. (Payslip, post-grad, UAN etc. are handled separately.)
+function mandatoryDocsFor(employee) {
+  return employee.isFresher
+    ? ['aadhaar', 'pan', 'marksheet10th', 'marksheet12th', 'degreeCertificate']
+    : ['aadhaar', 'pan', 'marksheet10th', 'marksheet12th', 'degreeCertificate', 'relievingLetter'];
+}
+
+// Documents are "locked" once every mandatory document has been verified (or accepted
+// by a manager/recruiter). Derived from verificationResults, which is persisted, so the
+// lock survives restarts and also applies to joinees verified before this rule existed.
+function docsLocked(employee) {
+  const vr = employee.verificationResults || {};
+  return mandatoryDocsFor(employee).every(d => vr[d] && vr[d].valid === true);
+}
+
+// A manager request for the relieving-letter slot can be opened when that slot holds
+// something other than a verified letter — unless there is no manager address, or the
+// manager already said NO (then the normal rejection applies; no second request).
+function canRequestExitMailApproval(employee) {
+  const prior = employee.exitMailApprovals && employee.exitMailApprovals.relievingLetter;
+  if (prior && prior.status === 'declined') return false;
+  return !!(employee.contacts && employee.contacts.managerEmail);
+}
+
+// Close any open manager request for the relieving letter (and its 48h no-reply timer)
+// once the slot has been settled another way — a real letter passed, the recruiter approved
+// it, or onboarding was stopped. A late manager reply must not act on it afterwards.
+function resolveExitMailRequest(employee, status) {
+  if (employee.replyTimers && employee.replyTimers.exitMail) {
+    employee.replyTimers.exitMail.stop && employee.replyTimers.exitMail.stop();
+    delete employee.replyTimers.exitMail;
+  }
+  const pending = employee.exitMailApprovals && employee.exitMailApprovals.relievingLetter;
+  if (pending && pending.status === 'pending') {
+    pending.status = status;
+    pending.resolvedAt = new Date().toISOString();
+  }
+}
+
+// Experienced joinee whose relieving-letter slot holds something other than a verified
+// relieving/experience letter (typically an exit email from the previous employer): send it
+// to the new reporting manager for a YES/NO instead of rejecting it. Returns true when the
+// manager has been (or already was) asked, so the caller skips the rejection.
+async function requestExitMailApproval(auth, employee, file, issue) {
+  if (!canRequestExitMailApproval(employee)) return false;
+  const approvals = employee.exitMailApprovals = employee.exitMailApprovals || {};
+  const prior = approvals.relievingLetter;
+  const alreadyPending = !!(prior && prior.status === 'pending');
+  const managerEmail = employee.contacts.managerEmail;
+
+  let tempPath;
+  try {
+    const dl = await downloadDriveFile(auth, file.id, file.mimeType);
+    tempPath = dl.tempPath;
+    const attachment = { filename: file.name, content: fs.readFileSync(tempPath), contentType: dl.downloadMime || file.mimeType };
+    await sendExitMailApprovalRequest(employee, managerEmail, attachment, issue);
+  } catch (err) {
+    if (alreadyPending) {
+      // The manager already has a request open for this slot — do not also reject the joinee.
+      console.warn(`[Index] Extra exit-mail file for ${employee.name} could not be sent to the manager: ${err.message}`);
+      return true;
+    }
+    console.warn(`[Index] Exit-mail approval request failed for ${employee.name}: ${err.message} — falling back to normal rejection`);
+    return false;
+  } finally {
+    if (tempPath && fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+  }
+
+  if (alreadyPending) {
+    // Another file for the same open request (e.g. a second screenshot): the manager was sent it;
+    // keep the original request and its 48h timer.
+    prior.files = [...(prior.files || [prior.fileName]), file.name];
+    activityLog.log(employee, 'exit_mail_approval_requested', `${file.name} also sent to ${managerEmail}`);
+    return true;
+  }
+
+  approvals.relievingLetter = { status: 'pending', fileId: file.id, fileName: file.name, files: [file.name], managerEmail, requestedAt: new Date().toISOString() };
+  // A rejection reminder chain from an earlier failed upload no longer applies.
+  if (employee.noResponseTimers && employee.noResponseTimers.relievingLetter) {
+    employee.noResponseTimers.relievingLetter.stop();
+    delete employee.noResponseTimers.relievingLetter;
+  }
+  employee.replyTimers = employee.replyTimers || {};
+  if (employee.replyTimers.exitMail && employee.replyTimers.exitMail.stop) employee.replyTimers.exitMail.stop();
+  employee.replyTimers.exitMail = scheduleReplyDeadline(
+    employee, EXIT_MAIL_TIMER_LABEL, managerEmail, 48, EXIT_MAIL_TIMER_CONTEXT(employee)
+  );
+  activityLog.log(employee, 'exit_mail_approval_requested', `${file.name} sent to ${managerEmail}`);
+  console.log(`[Index] Exit mail for ${employee.name} sent to ${managerEmail} for approval`);
+  return true;
+}
+const EXIT_MAIL_TIMER_LABEL = 'Reporting Manager (Exit Mail Approval)';
+const EXIT_MAIL_TIMER_CONTEXT = employee =>
+  `The system sent the reporting manager ${employee.name}'s exit email from their previous employer (in place of a relieving letter) and asked whether it is sufficient to proceed. No YES/NO reply has been received.`;
+
 // ─── Handler: new file detected in Drive folder ────────────────────────────────
 // Internal files the engine creates — never treat as employee documents
 const INTERNAL_FILE_PREFIXES = [
@@ -748,6 +847,13 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
     console.error(`[Index] detectDocType failed for ${file.name}:`, err.message);
     return false;
   }
+  if (!docType && docsLocked(employee)) {
+    // All mandatory documents are already verified — an unrecognised later upload is ignored, no emails
+    console.log(`[Index] Documents locked for ${employee.name} — ignoring unrecognised file ${file.name}`);
+    employee.processedFileIds.add(file.id);
+    releaseFileLock();
+    return true;
+  }
   if (!docType) {
     console.log(`[Index] Could not classify file: ${file.name} — sending re-upload request`);
     activityLog.log(employee, 'document_rejected', `${file.name} — Could not identify document type from content or filename. Please re-upload a valid HR document.`);
@@ -761,9 +867,13 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
 
   // Also skip if this doc type already passed — belt-and-suspenders guard
   const existingResult = employee.verificationResults && employee.verificationResults[docType];
-  if (existingResult && existingResult.valid) {
+  // Once all mandatory documents are verified, the verified Aadhaar already satisfies permanent
+  // address proof, so a later upload to that folder is not re-checked either.
+  const addressSatisfiedByAadhaar = docType === 'permanentAddressProof' && docsLocked(employee);
+  if ((existingResult && existingResult.valid) || addressSatisfiedByAadhaar) {
     console.log(`[Index] Skipping ${file.name} — ${docType} already verified`);
     employee.processedFileIds.add(file.id);
+    releaseFileLock();
     return true;
   }
 
@@ -790,15 +900,38 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
 
   // Always accumulate verification results for the report (pass or fail)
   employee.verificationResults = employee.verificationResults || {};
-  employee.verificationResults[docType] = {
-    valid: result.valid,
-    summary: result.valid
-      ? (result.summary || 'Verification successful')
-      : (result.failureReasons ? result.failureReasons.join('; ') : 'Verification failed'),
-  };
+  // A failed relieving-letter slot is asked about with the manager (see below). Record it as
+  // "pending" from the very first write so nothing reading the results in the meantime
+  // (e.g. the all-documents report) can see it as failed.
+  const askManager = !result.valid && docType === 'relievingLetter' && canRequestExitMailApproval(employee);
+  employee.verificationResults[docType] = askManager
+    ? { valid: null, pending: true, summary: 'Exit email awaiting reporting manager approval' }
+    : {
+        valid: result.valid,
+        summary: result.valid
+          ? (result.summary || 'Verification successful')
+          : (result.failureReasons ? result.failureReasons.join('; ') : 'Verification failed'),
+      };
 
   // Sheet: mark documents received
   await markDocumentsReceived(auth, employee, docType).catch(() => {});
+
+  // Anything in the relieving-letter slot that is not an actual relieving/experience letter
+  // (e.g. an exit email from the previous employer): ask the reporting manager YES/NO instead
+  // of rejecting. The result stays "pending" (neither passed nor failed) so no rejection
+  // email goes out and the report waits for the answer.
+  if (askManager) {
+    const issue = result.failureReasons ? result.failureReasons.join('; ') : (result.summary || 'Verification failed');
+    if (await requestExitMailApproval(auth, employee, file, issue)) {
+      employee.processedFileIds.add(file.id);
+      releaseFileLock();
+      await uploadChecklist(auth, employee.driveFolderId, employee.checklist);
+      saveState(employee.employeeId, snapshotEmployee(employee));
+      return true;
+    }
+    // Could not reach the manager — fall through to the normal rejection
+    employee.verificationResults[docType] = { valid: false, summary: issue };
+  }
 
   if (result.valid) {
     console.log(`[Index] ✓ ${file.name} passed verification`);
@@ -818,6 +951,8 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
       employee.noResponseTimers[docType].stop();
       delete employee.noResponseTimers[docType];
     }
+    // A real relieving letter settles the slot — close any open manager request
+    if (docType === 'relievingLetter') resolveExitMailRequest(employee, 'superseded');
 
     // If a rejection was previously issued for any doc, clear the "Documents not ok" sheet row
     await markDocumentsVerifiedOk(auth, employee).catch(() => {});
@@ -931,9 +1066,7 @@ function triggerEmployeeInfoSheetCreation(auth, employee, reason) {
 // happened to be uploaded, leaving t9 unmarked and the info sheet permanently missing.
 async function checkCoreDocsAndCreateInfoSheet(auth, employee) {
   const checklist = employee.checklist;
-  const ALL_DOCS = employee.isFresher
-    ? ['aadhaar', 'pan', 'marksheet10th', 'marksheet12th', 'degreeCertificate']
-    : ['aadhaar', 'pan', 'marksheet10th', 'marksheet12th', 'degreeCertificate', 'relievingLetter'];
+  const ALL_DOCS = mandatoryDocsFor(employee);
   const reportLockKey = `${employee.employeeId}:t9`;
   if (!isTaskDone(checklist, 't9') && !_triggerLocks.has(reportLockKey)) {
     const vr = employee.verificationResults || {};
@@ -1362,7 +1495,8 @@ async function stopEmployeeOnboarding(auth, employee, reason) {
   // 1. Cancel all active milestone cron jobs
   cancelAllJobs(employee.employeeId);
 
-  // 2. Clear all active reply timers & no-response timers
+  // 2. Clear all active reply timers & no-response timers (and close any open manager request)
+  resolveExitMailRequest(employee, 'cancelled');
   if (employee.replyTimers) {
     for (const [key, t] of Object.entries(employee.replyTimers)) {
       if (t && typeof t.stop === 'function') {
@@ -1439,6 +1573,7 @@ async function handleReply(auth, classified, rawMsg) {
       // Allow BGV re-processing when previous result was Orange/Red (t25 done but t26 not done)
       bgv_report:                 e => isTaskDone(e.checklist, 't23') && !isTaskDone(e.checklist, 't26'),
       induction_confirmed:        e => !isTaskDone(e.checklist, 't33'),
+      exit_mail_approval:         e => e.status !== 'stopped' && !e.isStopped && !!(e.exitMailApprovals && e.exitMailApprovals.relievingLetter && e.exitMailApprovals.relievingLetter.status === 'pending'),
     };
 
     const pendingCheck = PENDING_TASK_MAP[replyType];
@@ -2021,6 +2156,72 @@ async function handleReply(auth, classified, rawMsg) {
       break;
     }
 
+    case 'exit_mail_approval': {
+      // Reporting manager's YES/NO on a joinee's exit email (sent in place of a relieving letter)
+      const pending = employee.exitMailApprovals && employee.exitMailApprovals.relievingLetter;
+      if (employee.status === 'stopped' || employee.isStopped) {
+        console.log(`[Index] exit_mail_approval for ${employee.name} ignored — onboarding was stopped`);
+        return;
+      }
+      if (!pending || pending.status !== 'pending') {
+        console.log(`[Index] exit_mail_approval for ${employee.name} ignored — no request is pending`);
+        return;
+      }
+      if (employee.verificationResults && employee.verificationResults.relievingLetter && employee.verificationResults.relievingLetter.valid === true) {
+        // The slot was already settled another way — never overwrite a verified letter
+        resolveExitMailRequest(employee, 'superseded');
+        saveState(employee.employeeId, snapshotEmployee(employee));
+        console.log(`[Index] exit_mail_approval for ${employee.name} ignored — relieving letter already verified`);
+        return;
+      }
+      const senderEmail = rawMsg && rawMsg.from
+        ? rawMsg.from.toLowerCase().replace(/.*<([^>]+)>.*/, '$1').trim()
+        : '';
+      const allowedSenders = [pending.managerEmail, employee.contacts && employee.contacts.managerEmail, employee.contacts && employee.contacts.recruiterEmail, process.env.HR_EMAIL]
+        .filter(Boolean).map(a => a.toLowerCase());
+      if (senderEmail && !allowedSenders.includes(senderEmail)) {
+        console.warn(`[Index] exit_mail_approval for ${employee.name} ignored — sender ${senderEmail} is not the manager/HR`);
+        return;
+      }
+      const decision = String((data && data.decision) || '').toLowerCase().trim();
+      if (decision !== 'yes' && decision !== 'no') {
+        console.log(`[Index] exit_mail_approval for ${employee.name} — reply was unclear, still waiting for a YES/NO`);
+        return;
+      }
+      if (employee.replyTimers && employee.replyTimers.exitMail) {
+        employee.replyTimers.exitMail.stop && employee.replyTimers.exitMail.stop();
+        delete employee.replyTimers.exitMail;
+      }
+      pending.resolvedAt = new Date().toISOString();
+      employee.verificationResults = employee.verificationResults || {};
+      if (decision === 'yes') {
+        pending.status = 'approved';
+        employee.verificationResults.relievingLetter = { valid: true, manual: true, summary: 'Exit email accepted by reporting manager in place of relieving letter' };
+        if (!isTaskDone(checklist, DOC_TASK_MAP.relievingLetter)) markAndLog(employee, DOC_TASK_MAP.relievingLetter);
+        if (employee.noResponseTimers['relievingLetter']) { employee.noResponseTimers['relievingLetter'].stop(); delete employee.noResponseTimers['relievingLetter']; }
+        activityLog.log(employee, 'exit_mail_approved', `Exit email accepted by ${senderEmail || 'manager'}`);
+        await markDocumentsVerifiedOk(auth, employee).catch(() => {});
+        await uploadChecklist(auth, employee.driveFolderId, checklist);
+        saveState(employee.employeeId, snapshotEmployee(employee));
+        await triggerNextStep(auth, employee, 'relievingLetter');
+      } else {
+        pending.status = 'declined';
+        const reason = 'Your reporting manager reviewed the exit email you submitted and could not accept it in place of a relieving / experience letter. Please upload your relieving or experience letter.';
+        employee.verificationResults.relievingLetter = { valid: false, summary: reason };
+        activityLog.log(employee, 'exit_mail_declined', `Exit email declined by ${senderEmail || 'manager'}`);
+        await sendDocumentRejection(employee, 'Relieving Letter', reason).catch(err =>
+          console.warn(`[Index] Document rejection email failed for ${employee.name}: ${err.message}`)
+        );
+        await markDocumentIssue(auth, employee, 'Relieving Letter', reason).catch(() => {});
+        if (!isTaskDone(checklist, 't10')) markAndLog(employee, 't10');
+        if (employee.noResponseTimers['relievingLetter']) employee.noResponseTimers['relievingLetter'].stop();
+        const alertRecipient = (employee.contacts && employee.contacts.recruiterEmail) || process.env.HR_EMAIL;
+        employee.noResponseTimers['relievingLetter'] = scheduleDocumentReminders(employee, 'Relieving Letter', reason, alertRecipient);
+        await checkCoreDocsAndCreateInfoSheet(auth, employee).catch(() => {});
+      }
+      break;
+    }
+
     case 'doc_manually_approved': {
       // Recruiter replied "Confirmed" to a document rejection email after reviewing
       // the document the joinee sent directly. Map the label back to internal docType key.
@@ -2058,6 +2259,10 @@ async function handleReply(auth, classified, rawMsg) {
       }
       employee.verificationResults = employee.verificationResults || {};
       employee.verificationResults[internalDocType] = { valid: true, manual: true, summary: 'Manually approved by recruiter' };
+      if (internalDocType === 'relievingLetter') {
+        resolveExitMailRequest(employee, 'superseded');
+        if (employee.noResponseTimers && employee.noResponseTimers.relievingLetter) { employee.noResponseTimers.relievingLetter.stop(); delete employee.noResponseTimers.relievingLetter; }
+      }
       const taskId = DOC_TASK_MAP[internalDocType];
       if (taskId && !isTaskDone(checklist, taskId)) markAndLog(employee, taskId);
       activityLog.log(employee, 'doc_manually_approved', `${internalDocType} approved by recruiter`);
@@ -2105,7 +2310,7 @@ async function onboardEmployee(auth, employee) {
   if (employee.replyTimerExpiry) {
     // Timer key → checklist task ID that marks the awaited reply as received.
     // If the task is already done, the reply was received and the timer is moot — skip it.
-    const TIMER_DONE_TASK = { hr: 't15', manager: 't19', it: 't20', itDoj: 't21', induction: 't33', '30dayReview': 't44', '60dayNoReply': 't48', '90dayNoReply': 't51', probationNoReply: 't52' };
+    const TIMER_DONE_TASK = { hr: 't15', manager: 't19', it: 't20', itDoj: 't21', exitMail: 't58', induction: 't33', '30dayReview': 't44', '60dayNoReply': 't48', '90dayNoReply': 't51', probationNoReply: 't52' };
     const now = Date.now();
     for (const [key, entry] of Object.entries(employee.replyTimerExpiry)) {
       const doneTask = TIMER_DONE_TASK[key];
@@ -2121,10 +2326,12 @@ async function onboardEmployee(auth, employee) {
       const expiresAt = new Date(isoDate);
       if (expiresAt > now) {
         employee.replyTimers = employee.replyTimers || {};
-        employee.replyTimers[key] = scheduleReplyDeadline(
-          employee, key, recipientEmail,
-          (expiresAt - now) / (60 * 60 * 1000)
-        );
+        employee.replyTimers[key] = key === 'exitMail'
+          ? scheduleReplyDeadline(employee, EXIT_MAIL_TIMER_LABEL, recipientEmail, (expiresAt - now) / (60 * 60 * 1000), EXIT_MAIL_TIMER_CONTEXT(employee))
+          : scheduleReplyDeadline(
+              employee, key, recipientEmail,
+              (expiresAt - now) / (60 * 60 * 1000)
+            );
         console.log(`[Index] Restored reply-deadline timer "${key}" for ${employee.name} → ${recipientEmail} (fires ${expiresAt.toISOString()})`);
       } else {
         console.log(`[Index] Reply-deadline timer "${key}" for ${employee.name} already expired — skipping`);
@@ -2746,7 +2953,7 @@ async function main() {
     cancelAllJobs,
     stopEmployeeOnboarding: (emp, reason) => stopEmployeeOnboarding(auth, emp, reason),
     saveState: (employeeId, emp) => saveState(employeeId, snapshotEmployee(emp)),
-    handleNewFile: (a, emp, file) => handleNewFile(a, emp, file),
+    handleNewFile: (a, emp, file, subfolderHint) => handleNewFile(a, emp, file, subfolderHint),
     handleReply: (classified, rawMsg) => handleReply(auth, classified, rawMsg),
     onNewEmployee: async (data) => {
       const dojDate = new Date(data.doj);
@@ -2768,6 +2975,7 @@ async function main() {
         reviewSummarySentAt: saved ? (saved.reviewSummarySentAt || {}) : {},
         meetLinks: saved ? (saved.meetLinks || {}) : {},
         verificationResults: saved ? (saved.verificationResults || {}) : {},
+        exitMailApprovals: saved ? (saved.exitMailApprovals || {}) : {},
         extractedData: saved ? (saved.extractedData || {}) : {},
         replyTimerExpiry: saved ? (saved.replyTimerExpiry || {}) : {},
         noResponseTimers: {},
@@ -2852,6 +3060,7 @@ async function main() {
       if (saved && saved.milestonesScheduled && !employee.milestonesScheduled) employee.milestonesScheduled = true;
       if (saved && saved.verificationResults) employee.verificationResults = saved.verificationResults;
       if (saved && saved.extractedData) employee.extractedData = saved.extractedData;
+      if (saved && saved.exitMailApprovals) employee.exitMailApprovals = saved.exitMailApprovals;
       if (saved && saved.replyTimerExpiry) employee.replyTimerExpiry = saved.replyTimerExpiry;
       if (!employee.noResponseTimers) employee.noResponseTimers = {};
       if (!employee.replyTimers) employee.replyTimers = {};

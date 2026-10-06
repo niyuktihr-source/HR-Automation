@@ -227,7 +227,7 @@ Only set valid=true if ALL four checks pass.`,
 }
 Important: For PG rent slips, the employee's name may not appear on the document — this is normal and acceptable. Set nameVisible=true for PG rent slips as long as the PG address is clearly visible. Only set valid=false if the document is illegible, shows no address at all, or is not one of the valid document types listed above.`,
 
-  permanentAddressProof: `You are verifying a permanent address proof document submitted by a new employee. The only valid document is an Aadhaar card. Check ALL of the following and respond with a JSON object:
+  permanentAddressProof: `You are verifying a permanent (hometown) address proof document submitted by a new employee. Valid document types are: Aadhaar card, electricity bill, rental agreement, or rent receipt. Check ALL of the following and respond with a JSON object:
 {
   "valid": true/false,
   "docType": "Permanent Address Proof",
@@ -235,20 +235,21 @@ Important: For PG rent slips, the employee's name may not appear on the document
     "legible": true/false,
     "nameVisible": true/false,
     "addressVisible": true/false,
-    "isAadhaar": true/false
+    "isValidDocumentType": true/false
   },
   "failureReasons": ["list any failed checks in plain English"],
   "summary": "one sentence summary"
 }
 Check definitions:
 - "legible": The document is clearly readable — not too blurry, cropped, or dark to read key fields.
-- "nameVisible": The name of the tenant, account holder, or lessee is visible anywhere on the document.
-- "addressVisible": A residential address (house number, street, city) is visible anywhere on the document.
+- "nameVisible": The name of the cardholder, tenant, account holder, or lessee is visible anywhere on the document.
+- "addressVisible": A residential address (house number, street, city) is visible anywhere on the document. On an Aadhaar card the address is printed on the back, so the back side (or a front+back combined image/PDF) is expected for this check.
 - "isValidDocumentType": The document is recognisably ONE of the following — set true if ANY one matches:
-    1. Electricity bill — shows a utility company name, account number, bill period, and amount due.
-    2. Rental agreement — a lease/rental contract between a landlord and tenant, may include an e-Stamp / government stamp paper, with property address and signatures.
-    3. Rent receipt — a receipt (printed or handwritten) acknowledging rent payment, showing tenant name, address, amount, and landlord signature.
-  Set false if the document is clearly something else (Aadhaar, PAN, marksheet, etc.).
+    1. Aadhaar card — an Indian Aadhaar card with UIDAI / Aadhaar branding and a 12-digit UID number (a masked number showing the last 4 digits still counts; a printed e-Aadhaar or mAadhaar PDF also counts).
+    2. Electricity bill — shows a utility company name, account number, bill period, and amount due.
+    3. Rental agreement — a lease/rental contract between a landlord and tenant, may include an e-Stamp / government stamp paper, with property address and signatures.
+    4. Rent receipt — a receipt (printed or handwritten) acknowledging rent payment, showing tenant name, address, amount, and landlord signature.
+  Set false if the document is clearly something else (PAN, marksheet, offer letter, etc.). An Aadhaar card IS a valid document here — never fail it for being an Aadhaar.
 Only set valid=true if ALL four checks pass.`,
 
   uan: `You are verifying a UAN (Universal Account Number) document submitted by a new employee. This should be a screenshot or PDF from the UMANG app or EPFO portal showing the employee's UAN. Respond with a JSON object:
@@ -445,7 +446,7 @@ Document type descriptions:
 - degreeCertificate: Graduation degree certificate or consolidated marksheet — BE/BTech/BSc/BBA/BCA/BCom or similar, issued by a university
 - postgradCertificate: Post-graduation certificate — MTech/MBA/MSc/MCA/PhD or similar, issued by a university
 - currentAddressProof: Current/present address proof — can be an Aadhaar card, PG rent slip, wifi bill, electricity bill, or rent agreement showing the employee's current residential address
-- permanentAddressProof: Permanent address proof — Aadhaar card only (shows 12-digit UID, name, address, and UIDAI branding)
+- permanentAddressProof: Permanent address proof — can be an Aadhaar card, electricity bill, rental agreement, or rent receipt showing the employee's permanent (hometown) address
 - uan: UAN (Universal Account Number) document — a screenshot or PDF from the UMANG app or EPFO portal showing a 12-digit UAN number
 
 Respond with null docType if the document does not match any of the above.`,
@@ -721,4 +722,4 @@ function crossCheckDocuments(extractedData) {
   return mismatches;
 }
 
-module.exports = { verifyDocument, verifyAllDocuments, detectDocType, extractDocumentData, crossCheckDocuments };
+module.exports = { downloadDriveFile, verifyDocument, verifyAllDocuments, detectDocType, extractDocumentData, crossCheckDocuments };

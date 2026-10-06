@@ -84,7 +84,7 @@ function createExperiencedPreonboardingForm() {
 
   form.addTextItem()
     .setTitle('Permanent Address Proof')
-    .setHelpText('Your hometown/permanent address — Aadhaar card only. — Change this question type to File Upload')
+    .setHelpText('Your hometown/permanent address — Aadhaar card, electricity bill, rental agreement or rent receipt. — Change this question type to File Upload')
     .setRequired(true);
 
   form.addTextItem()

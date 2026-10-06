@@ -87,7 +87,7 @@ function createFresherPreonboardingForm() {
 
   form.addTextItem()
     .setTitle('Permanent Address Proof')
-    .setHelpText('Aadhaar card showing your permanent/hometown address. — Change this question type to File Upload')
+    .setHelpText('Aadhaar card, electricity bill, rental agreement or rent receipt showing your permanent/hometown address. — Change this question type to File Upload')
     .setRequired(true);
 
   form.addTextItem()

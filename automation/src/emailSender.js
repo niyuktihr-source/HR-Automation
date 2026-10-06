@@ -290,6 +290,30 @@ async function sendOfficialEmailAccessTest(employee) {
   });
 }
 
+// Relieving-letter approval request — sent to the new reporting manager when the joinee's
+// relieving-letter upload is not a verifiable relieving/experience letter (typically an exit
+// email from the previous employer). The joinee's file is attached; the manager replies
+// YES (sufficient) or NO.
+async function sendExitMailApprovalRequest(employee, managerEmail, attachment, issue) {
+  const { name, employeeId } = employee;
+  const co = esc(process.env.COMPANY_NAME || '');
+  const recruiterEmail = employee.contacts && employee.contacts.recruiterEmail;
+  return sendEmail({
+    to: managerEmail,
+    cc: recruiterEmail,
+    subject: `Exit Mail Approval Required — ${name} (${employeeId})`,
+    html: `
+      <p>Dear Manager,</p>
+      <p><strong>${esc(name)}</strong> (${esc(employeeId)}) is joining your team. The document they uploaded as their previous-employer relieving / experience letter (for example an exit email from the previous company) could not be verified as a formal relieving letter and is attached to this email.</p>
+      ${issue ? `<p>Why the automated check did not accept it:</p><blockquote style="border-left:4px solid #ffa000;padding:8px 16px;color:#555;">${esc(issue)}</blockquote>` : ''}
+      <p>Please review the attachment and confirm whether it is <strong>sufficient to proceed with onboarding</strong>.</p>
+      <p><strong>Reply to this email with "YES"</strong> if it is acceptable, or <strong>"NO"</strong> if it is not (the joinee will then be asked to upload a relieving / experience letter).</p>
+      <p>Regards,<br/>${co} HR Automation</p>
+    `,
+    attachments: attachment ? [attachment] : undefined,
+  });
+}
+
 // Template 5: Asset allocation request to reporting manager
 async function sendAssetAllocationRequest(employee, managerEmail) {
   const { name, employeeId, doj } = employee;
@@ -1548,6 +1572,7 @@ module.exports = {
   sendEmail,
   sendPreOnboardingForm,
   sendDocumentRejection,
+  sendExitMailApprovalRequest,
   sendDocumentReminder,
   sendPreOnboardingReminder,
   sendNoResponseAlert,
