@@ -594,12 +594,12 @@ function docsLocked(employee) {
 function canRequestExitMailApproval(employee) {
   const prior = employee.exitMailApprovals && employee.exitMailApprovals.relievingLetter;
   if (prior && prior.status === 'declined') return false;
-  return !!(employee.contacts && employee.contacts.managerEmail);
+  return !!process.env.HR_EMAIL;
 }
 
-// Close any open manager request for the relieving letter (and its 48h no-reply timer)
-// once the slot has been settled another way — a real letter passed, the recruiter approved
-// it, or onboarding was stopped. A late manager reply must not act on it afterwards.
+// Close any open HR request for the relieving letter (and its 48h no-reply timer)
+// once the slot has been settled another way — a real letter passed, HR approved
+// it, or onboarding was stopped. A late reply must not act on it afterwards.
 function resolveExitMailRequest(employee, status) {
   if (employee.replyTimers && employee.replyTimers.exitMail) {
     employee.replyTimers.exitMail.stop && employee.replyTimers.exitMail.stop();
@@ -614,25 +614,25 @@ function resolveExitMailRequest(employee, status) {
 
 // Experienced joinee whose relieving-letter slot holds something other than a verified
 // relieving/experience letter (typically an exit email from the previous employer): send it
-// to the new reporting manager for a YES/NO instead of rejecting it. Returns true when the
-// manager has been (or already was) asked, so the caller skips the rejection.
+// to HR for a YES/NO instead of rejecting it. Returns true when HR has been (or already
+// was) asked, so the caller skips the rejection. The reporting manager is never looped in.
 async function requestExitMailApproval(auth, employee, file, issue) {
   if (!canRequestExitMailApproval(employee)) return false;
   const approvals = employee.exitMailApprovals = employee.exitMailApprovals || {};
   const prior = approvals.relievingLetter;
   const alreadyPending = !!(prior && prior.status === 'pending');
-  const managerEmail = employee.contacts.managerEmail;
+  const hrEmail = process.env.HR_EMAIL;
 
   let tempPath;
   try {
     const dl = await downloadDriveFile(auth, file.id, file.mimeType);
     tempPath = dl.tempPath;
     const attachment = { filename: file.name, content: fs.readFileSync(tempPath), contentType: dl.downloadMime || file.mimeType };
-    await sendExitMailApprovalRequest(employee, managerEmail, attachment, issue);
+    await sendExitMailApprovalRequest(employee, hrEmail, attachment, issue);
   } catch (err) {
     if (alreadyPending) {
-      // The manager already has a request open for this slot — do not also reject the joinee.
-      console.warn(`[Index] Extra exit-mail file for ${employee.name} could not be sent to the manager: ${err.message}`);
+      // HR already has a request open for this slot — do not also reject the joinee.
+      console.warn(`[Index] Extra exit-mail file for ${employee.name} could not be sent to HR: ${err.message}`);
       return true;
     }
     console.warn(`[Index] Exit-mail approval request failed for ${employee.name}: ${err.message} — falling back to normal rejection`);
@@ -642,14 +642,14 @@ async function requestExitMailApproval(auth, employee, file, issue) {
   }
 
   if (alreadyPending) {
-    // Another file for the same open request (e.g. a second screenshot): the manager was sent it;
+    // Another file for the same open request (e.g. a second screenshot): HR was sent it;
     // keep the original request and its 48h timer.
     prior.files = [...(prior.files || [prior.fileName]), file.name];
-    activityLog.log(employee, 'exit_mail_approval_requested', `${file.name} also sent to ${managerEmail}`);
+    activityLog.log(employee, 'exit_mail_approval_requested', `${file.name} also sent to ${hrEmail}`);
     return true;
   }
 
-  approvals.relievingLetter = { status: 'pending', fileId: file.id, fileName: file.name, files: [file.name], managerEmail, requestedAt: new Date().toISOString() };
+  approvals.relievingLetter = { status: 'pending', fileId: file.id, fileName: file.name, files: [file.name], hrEmail, requestedAt: new Date().toISOString() };
   // A rejection reminder chain from an earlier failed upload no longer applies.
   if (employee.noResponseTimers && employee.noResponseTimers.relievingLetter) {
     employee.noResponseTimers.relievingLetter.stop();
@@ -658,15 +658,15 @@ async function requestExitMailApproval(auth, employee, file, issue) {
   employee.replyTimers = employee.replyTimers || {};
   if (employee.replyTimers.exitMail && employee.replyTimers.exitMail.stop) employee.replyTimers.exitMail.stop();
   employee.replyTimers.exitMail = scheduleReplyDeadline(
-    employee, EXIT_MAIL_TIMER_LABEL, managerEmail, 48, EXIT_MAIL_TIMER_CONTEXT(employee)
+    employee, EXIT_MAIL_TIMER_LABEL, hrEmail, 48, EXIT_MAIL_TIMER_CONTEXT(employee)
   );
-  activityLog.log(employee, 'exit_mail_approval_requested', `${file.name} sent to ${managerEmail}`);
-  console.log(`[Index] Exit mail for ${employee.name} sent to ${managerEmail} for approval`);
+  activityLog.log(employee, 'exit_mail_approval_requested', `${file.name} sent to ${hrEmail}`);
+  console.log(`[Index] Exit mail for ${employee.name} sent to ${hrEmail} for approval`);
   return true;
 }
-const EXIT_MAIL_TIMER_LABEL = 'Reporting Manager (Exit Mail Approval)';
+const EXIT_MAIL_TIMER_LABEL = 'HR (Exit Mail Approval)';
 const EXIT_MAIL_TIMER_CONTEXT = employee =>
-  `The system sent the reporting manager ${employee.name}'s exit email from their previous employer (in place of a relieving letter) and asked whether it is sufficient to proceed. No YES/NO reply has been received.`;
+  `The system sent HR ${employee.name}'s exit email from their previous employer (in place of a relieving letter) and asked whether it is sufficient to proceed. No YES/NO reply has been received.`;
 
 // ─── Handler: new file detected in Drive folder ────────────────────────────────
 // Internal files the engine creates — never treat as employee documents
@@ -2179,7 +2179,8 @@ async function handleReply(auth, classified, rawMsg) {
     }
 
     case 'exit_mail_approval': {
-      // Reporting manager's YES/NO on a joinee's exit email (sent in place of a relieving letter)
+      // HR's YES/NO on a joinee's exit email (sent in place of a relieving letter) — the
+      // reporting manager is never looped into this flow.
       const pending = employee.exitMailApprovals && employee.exitMailApprovals.relievingLetter;
       if (employee.status === 'stopped' || employee.isStopped) {
         console.log(`[Index] exit_mail_approval for ${employee.name} ignored — onboarding was stopped`);
@@ -2199,10 +2200,13 @@ async function handleReply(auth, classified, rawMsg) {
       const senderEmail = rawMsg && rawMsg.from
         ? rawMsg.from.toLowerCase().replace(/.*<([^>]+)>.*/, '$1').trim()
         : '';
-      const allowedSenders = [pending.managerEmail, employee.contacts && employee.contacts.managerEmail, employee.contacts && employee.contacts.recruiterEmail, process.env.HR_EMAIL]
+      // pending.managerEmail is a backward-compat fallback for requests already sent to a
+      // manager before this flow was changed to go through HR only — new requests never set
+      // it, so it never applies to anything created after this change.
+      const allowedSenders = [pending.hrEmail, pending.managerEmail, process.env.HR_EMAIL, employee.contacts && employee.contacts.recruiterEmail]
         .filter(Boolean).map(a => a.toLowerCase());
       if (senderEmail && !allowedSenders.includes(senderEmail)) {
-        console.warn(`[Index] exit_mail_approval for ${employee.name} ignored — sender ${senderEmail} is not the manager/HR`);
+        console.warn(`[Index] exit_mail_approval for ${employee.name} ignored — sender ${senderEmail} is not HR/recruiter`);
         return;
       }
       const decision = String((data && data.decision) || '').toLowerCase().trim();
@@ -2218,19 +2222,19 @@ async function handleReply(auth, classified, rawMsg) {
       employee.verificationResults = employee.verificationResults || {};
       if (decision === 'yes') {
         pending.status = 'approved';
-        employee.verificationResults.relievingLetter = { valid: true, manual: true, summary: 'Exit email accepted by reporting manager in place of relieving letter' };
+        employee.verificationResults.relievingLetter = { valid: true, manual: true, summary: 'Exit email accepted by HR in place of relieving letter' };
         if (!isTaskDone(checklist, DOC_TASK_MAP.relievingLetter)) markAndLog(employee, DOC_TASK_MAP.relievingLetter);
         if (employee.noResponseTimers['relievingLetter']) { employee.noResponseTimers['relievingLetter'].stop(); delete employee.noResponseTimers['relievingLetter']; }
-        activityLog.log(employee, 'exit_mail_approved', `Exit email accepted by ${senderEmail || 'manager'}`);
+        activityLog.log(employee, 'exit_mail_approved', `Exit email accepted by ${senderEmail || 'HR'}`);
         await markDocumentsVerifiedOk(auth, employee).catch(() => {});
         await uploadChecklist(auth, employee.driveFolderId, checklist);
         saveState(employee.employeeId, snapshotEmployee(employee));
         await triggerNextStep(auth, employee, 'relievingLetter');
       } else {
         pending.status = 'declined';
-        const reason = 'Your reporting manager reviewed the exit email you submitted and could not accept it in place of a relieving / experience letter. Please upload your relieving or experience letter.';
+        const reason = 'HR reviewed the exit email you submitted and could not accept it in place of a relieving / experience letter. Please upload your relieving or experience letter.';
         employee.verificationResults.relievingLetter = { valid: false, summary: reason };
-        activityLog.log(employee, 'exit_mail_declined', `Exit email declined by ${senderEmail || 'manager'}`);
+        activityLog.log(employee, 'exit_mail_declined', `Exit email declined by ${senderEmail || 'HR'}`);
         await sendDocumentRejection(employee, 'Relieving Letter', reason).catch(err =>
           console.warn(`[Index] Document rejection email failed for ${employee.name}: ${err.message}`)
         );
