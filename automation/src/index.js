@@ -789,6 +789,15 @@ async function fireInductionAndProjectIntro(auth, employee) {
   saveState(employee.employeeId, snapshotEmployee(employee));
 }
 
+// processedFileIds is keyed on this rather than the raw file ID, so a file that gets
+// *moved* into a different document slot after already being processed (a Drive move
+// keeps the same file ID) is re-evaluated under its new slot instead of being skipped
+// forever as "already processed". Falls back to the plain file ID when there's no
+// subfolder context, matching the legacy key already persisted for existing employees.
+function processedFileKey(fileId, subfolderHint) {
+  return subfolderHint ? `${fileId}::${subfolderHint}` : fileId;
+}
+
 async function handleNewFile(auth, employee, file, subfolderHint) {
   // Skip folders — only process actual files
   if (file.mimeType === 'application/vnd.google-apps.folder') {
@@ -822,7 +831,10 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
   // (a document that fails to be recognised on a later read must not be rejected again).
   // A new upload gets a new file ID, so it is still processed fresh.
   if (!employee.processedFileIds) employee.processedFileIds = new Set();
-  if (employee.processedFileIds.has(file.id)) {
+  // Check both the slot-scoped key and the legacy plain file-ID key (pre-existing
+  // entries saved before this key change) so already-processed files keep behaving
+  // exactly as before unless they're later moved to a different document slot.
+  if (employee.processedFileIds.has(processedFileKey(file.id, subfolderHint)) || employee.processedFileIds.has(file.id)) {
     console.log(`[Index] Skipping ${file.name} — already processed in a previous run`);
     return true;
   }
@@ -855,7 +867,7 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
   if (!docType && docsLocked(employee)) {
     // All mandatory documents are already verified — an unrecognised later upload is ignored, no emails
     console.log(`[Index] Documents locked for ${employee.name} — ignoring unrecognised file ${file.name}`);
-    employee.processedFileIds.add(file.id);
+    employee.processedFileIds.add(processedFileKey(file.id, subfolderHint));
     releaseFileLock();
     return true;
   }
@@ -864,7 +876,7 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
     activityLog.log(employee, 'document_rejected', `${file.name} — Could not identify document type from content or filename. Please re-upload a valid HR document.`);
     await sendDocumentRejection(employee, file.name, 'We could not identify what type of document this is. Please re-upload the correct document (Aadhaar, PAN, offer letter, marksheet, etc.).').catch(() => {});
     if (!employee.processedFileIds) employee.processedFileIds = new Set();
-    employee.processedFileIds.add(file.id);
+    employee.processedFileIds.add(processedFileKey(file.id, subfolderHint));
     releaseFileLock();
     saveState(employee.employeeId, snapshotEmployee(employee));
     return true;
@@ -877,7 +889,7 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
   const addressSatisfiedByAadhaar = docType === 'permanentAddressProof' && docsLocked(employee);
   if ((existingResult && existingResult.valid) || addressSatisfiedByAadhaar) {
     console.log(`[Index] Skipping ${file.name} — ${docType} already verified`);
-    employee.processedFileIds.add(file.id);
+    employee.processedFileIds.add(processedFileKey(file.id, subfolderHint));
     releaseFileLock();
     return true;
   }
@@ -933,7 +945,7 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
   if (askManager) {
     const issue = result.failureReasons ? result.failureReasons.join('; ') : (result.summary || 'Verification failed');
     if (await requestExitMailApproval(auth, employee, file, issue)) {
-      employee.processedFileIds.add(file.id);
+      employee.processedFileIds.add(processedFileKey(file.id, subfolderHint));
       releaseFileLock();
       await uploadChecklist(auth, employee.driveFolderId, employee.checklist);
       saveState(employee.employeeId, snapshotEmployee(employee));
@@ -1024,7 +1036,7 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
   // See the BGV auto-complete block in triggerNextStep which fires sendVerificationReport.
 
   // Record file as processed so restarts don't re-verify and re-send emails
-  employee.processedFileIds.add(file.id);
+  employee.processedFileIds.add(processedFileKey(file.id, subfolderHint));
   releaseFileLock();
 
   // Save updated checklist to Drive and locally

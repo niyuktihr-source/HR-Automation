@@ -170,6 +170,31 @@ const seenFileIds = loadSeenFiles();
 pruneSeenFiles(seenFileIds);
 setInterval(() => pruneSeenFiles(seenFileIds), 24 * 60 * 60 * 1000);
 
+// ─── Subfolder resolution for the /drive-push handler ─────────────────────────
+// getChangedFiles() returns files from anywhere in the employee's folder tree
+// (it queries 'in ancestors'), so a file moved into e.g. Relieving_Letter shows
+// up here too — but without a subfolderHint, handleNewFile falls back to
+// content/filename-based doc-type detection, which can misclassify a file whose
+// name or content resembles a different, already-verified doc type (it then
+// gets silently skipped as "already verified" instead of being evaluated under
+// its real slot). Resolving the hint from file.parents, same as the fallback
+// scan below, keeps this path consistent with the subfolder-aware pollers.
+// Cached per employee since the subfolder structure is fixed after scaffolding.
+const subfolderMapCache = {}; // employeeId -> { [folderId]: subfolderName }
+async function getSubfolderMap(employeeId, driveFolderId) {
+  if (subfolderMapCache[employeeId]) return subfolderMapCache[employeeId];
+  const { google } = require('googleapis');
+  const drive = google.drive({ version: 'v3', auth: _auth });
+  const res = await drive.files.list({
+    q: `'${driveFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+    fields: 'files(id, name)',
+  });
+  const map = {};
+  for (const sf of (res.data.files || [])) map[sf.id] = sf.name;
+  subfolderMapCache[employeeId] = map;
+  return map;
+}
+
 const app = express();
 
 // ─── Security headers (no helmet dep — set manually) ──────────────────────────
@@ -272,12 +297,19 @@ app.post('/drive-push', async (req, res) => {
     const sinceMs = Date.now() - config.driveChangeLookbackMs;
     const files = await getChangedFiles(_auth, employee.driveFolderId, sinceMs);
 
+    const subfolderMap = await getSubfolderMap(employeeId, employee.driveFolderId).catch(err => {
+      console.warn(`[Webhook] Could not resolve subfolder map for ${employee.name}: ${err.message}`);
+      return {};
+    });
+
     for (const file of files) {
       if (!seenFileIds[employeeId].has(file.id)) {
         seenFileIds[employeeId].add(file.id);
         saveSeenFiles(seenFileIds);
-        console.log(`[Webhook] Drive push → new file: ${file.name} for ${employee.name}`);
-        const ok = await _handleNewFile(_auth, employee, file).catch(err => {
+        const parentId = file.parents && file.parents[0];
+        const subfolderName = subfolderMap[parentId] || null;
+        console.log(`[Webhook] Drive push → new file: ${file.name} for ${employee.name}${subfolderName ? ` (in ${subfolderName})` : ''}`);
+        const ok = await _handleNewFile(_auth, employee, file, subfolderName).catch(err => {
           console.error(`[Webhook] handleNewFile error:`, err.message);
           return false;
         });
