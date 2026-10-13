@@ -1843,16 +1843,67 @@ async function handleReply(auth, classified, rawMsg) {
       }
       break;
 
-    case 'induction_confirmed':
+    case 'induction_confirmed': {
+      // "Confirmed" alone only proves the induction session happened — the email sent to
+      // the recruiter explicitly promised the checklist "will only turn green after the
+      // screenshot is uploaded, not just after this reply". t34 (screenshot verified) must
+      // stay gated on an actual screenshot, whether it arrives via Drive upload (the normal
+      // path, see docType === 'inductionScreenshot' above) or attached to this very reply
+      // (handled here, mirroring the working catchup25_complete pattern below).
       markAndLog(employee, 't33');
-      markAndLog(employee, 't34');
       activityLog.log(employee, 'induction_confirmed');
-      await markHRInductionDone(auth, employee).catch(() => {});
       if (employee.replyTimers && employee.replyTimers.induction) {
         employee.replyTimers.induction.stop && employee.replyTimers.induction.stop();
         delete employee.replyTimers.induction;
       }
+
+      const IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.heic', '.webp'];
+      const attachments = (rawMsg && rawMsg.attachments) || [];
+      const screenshot = attachments.find(a => IMAGE_EXTS.some(ext => (a.filename || '').toLowerCase().endsWith(ext)));
+
+      if (!screenshot) {
+        console.warn(`[Index] "Confirmed" reply for ${employee.name}'s HR induction had no screenshot attached — t34 stays pending until one is uploaded to HR_Induction_Screenshot`);
+        break;
+      }
+
+      try {
+        const { google } = require('googleapis');
+        const drive = google.drive({ version: 'v3', auth });
+        let buffer;
+        if (screenshot.data) {
+          buffer = Buffer.from(screenshot.data, 'base64');
+        } else if (screenshot.attachmentId) {
+          buffer = await downloadAttachment(auth, rawMsg.id, screenshot.attachmentId);
+        }
+        if (buffer && employee.driveFolderId) {
+          const subfolderRes = await drive.files.list({
+            q: `name='HR_Induction_Screenshot' and '${employee.driveFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+            fields: 'files(id)',
+          });
+          let targetFolderId = subfolderRes.data.files && subfolderRes.data.files[0] && subfolderRes.data.files[0].id;
+          if (!targetFolderId) {
+            const created = await drive.files.create({
+              requestBody: { name: 'HR_Induction_Screenshot', mimeType: 'application/vnd.google-apps.folder', parents: [employee.driveFolderId] },
+              fields: 'id',
+            });
+            targetFolderId = created.data.id;
+          }
+          const { Readable } = require('stream');
+          await drive.files.create({
+            requestBody: { name: screenshot.filename, parents: [targetFolderId] },
+            media: { mimeType: screenshot.mimeType, body: Readable.from(buffer) },
+            fields: 'id',
+          });
+          console.log(`[Index] Saved HR induction screenshot for ${employee.name} → HR_Induction_Screenshot/${screenshot.filename}`);
+          // Reuse the same completion path a real Drive upload would take (marks t34,
+          // uploads checklist, calls markHRInductionDone, and the t42 both-screenshots check).
+          await triggerNextStep(auth, employee, 'inductionScreenshot');
+        }
+      } catch (err) {
+        console.warn(`[Index] Could not save HR induction screenshot for ${employee.name}: ${err.message} — t34 stays pending`);
+      }
       break;
+    }
 
     case 'admin_allocation':
       markAndLog(employee, 't36');
