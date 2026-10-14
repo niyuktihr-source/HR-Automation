@@ -671,23 +671,7 @@ const EXIT_MAIL_TIMER_CONTEXT = employee =>
 
 // ─── Meeting screenshots (HR induction, project intro, 25-day catchup, 30/60/90-day reviews) ──────
 // Every meeting screenshot — Drive upload or email attachment — goes through handleNewFile ->
-// verifyDocument's meeting check. This builds what that check expects: the joinee's name and the
-// window the screenshot's date must fall in (from the day the meeting was due, a few days early
-// allowed, up to today).
-const MEETING_DATE_SLACK_DAYS = 3;
-const isoDay = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-const plusDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
-
-function meetingContext(employee, docType) {
-  const doj = new Date(employee.doj);
-  const ms = config.milestones;
-  const dueAfter = { catchupScreenshot: ms.surveyday, review30Screenshot: ms.catchup30day, review60Screenshot: ms.review60day, review90Screenshot: ms.review90day }[docType];
-  const start = dueAfter == null
-    ? plusDays(doj, -1) // induction / project intro happen on the date of joining
-    : plusDays(require('./workingDays').ensureWorkingDay(plusDays(doj, dueAfter)), -MEETING_DATE_SLACK_DAYS);
-  const now = new Date();
-  return { docType, employeeName: employee.name, windowStartISO: isoDay(start), windowEndISO: isoDay(now), todayISO: isoDay(now) };
-}
+// verifyDocument's meeting check, the same lenient "does this look like a meeting?" check for all six.
 
 // Saves a screenshot attached to an email reply into the joinee's Drive subfolder (created if
 // missing) and returns the Drive file { id, name, mimeType }, or null if it could not be saved.
@@ -996,7 +980,7 @@ async function handleNewFile(auth, employee, file, subfolderHint, opts = {}) {
   let result;
   try {
     result = await verifyDocument(auth, file.id, file.name, file.mimeType, subfolderHint,
-      MEETING_SCREENSHOTS[docType] ? meetingContext(employee, docType) : (opts.docType ? { docType } : undefined));
+      opts.docType ? { docType } : undefined);
   } catch (err) {
     if (err.serviceUnavailable) {
       // Temporary outage — retried by the poller on the next pass; no email and no activity-log spam
@@ -1007,16 +991,6 @@ async function handleNewFile(auth, employee, file, subfolderHint, opts = {}) {
     }
     releaseFileLock();
     return false; // signal caller to remove from seen-files so it can be retried
-  }
-
-  // The same image cannot prove two different meetings
-  if (MEETING_SCREENSHOTS[docType] && result.valid && result.imageHash) {
-    const other = Object.entries(employee.verificationResults || {}).find(([k, v]) => k !== docType && MEETING_SCREENSHOTS[k] && v && v.valid === true && v.imageHash === result.imageHash);
-    if (other) {
-      result.valid = false;
-      result.failureReasons = [`This is the same image already accepted for the ${MEETING_SCREENSHOTS[other[0]].label} meeting — each meeting needs its own screenshot.`];
-      result.summary = result.failureReasons[0];
-    }
   }
 
   // Always accumulate verification results for the report (pass or fail)
@@ -1032,7 +1006,6 @@ async function handleNewFile(auth, employee, file, subfolderHint, opts = {}) {
         summary: result.valid
           ? (result.summary || 'Verification successful')
           : (result.failureReasons ? result.failureReasons.join('; ') : 'Verification failed'),
-        ...(result.imageHash ? { imageHash: result.imageHash } : {}),
       };
 
   // Sheet: mark documents received

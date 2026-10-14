@@ -304,7 +304,7 @@ async function sendMeetingScreenshotRejection(employee, meetingLabel, reason, wh
       <p>Hi,</p>
       <p>The screenshot submitted as proof of the <strong>${esc(meetingLabel)}</strong> meeting for <strong>${esc(name)}</strong> (${esc(employeeId)}) was not accepted:</p>
       <blockquote style="border-left:4px solid #e53935;padding:8px 16px;color:#555;">${esc(reason)}</blockquote>
-      <p>The screenshot must show the meeting itself, with <strong>${esc(name)}</strong>'s name or the meeting title visible, and a <strong>date</strong> that matches when the meeting was held.</p>
+      <p>The screenshot must clearly show the meeting itself (for example the video-call screen, a meeting room, or the meeting's calendar entry).</p>
       <p>Please send a corrected screenshot${where ? ` — ${esc(where)}` : ''}. The milestone stays pending until an accepted screenshot is received.</p>
       <p>Regards,<br/>${co} HR Automation</p>
     `,
