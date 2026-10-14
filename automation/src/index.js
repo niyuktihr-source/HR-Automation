@@ -3,12 +3,13 @@ const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>
 const config = require('./config');
 const { encrypt, decrypt, isEncryptionEnabled } = require('./encryption');
 const { getAuthClient, watchFolder, watchFolderPolling, scaffoldEmployeeFolder, lockEmployeeFolder, uploadChecklist, uploadInstructions, listFolderFiles } = require('./driveWatcher');
-const { verifyDocument, detectDocType, extractDocumentData, crossCheckDocuments, downloadDriveFile } = require('./documentVerifier');
+const { verifyDocument, detectDocType, extractDocumentData, crossCheckDocuments, downloadDriveFile, MEETING_SCREENSHOTS } = require('./documentVerifier');
 const {
   sendEmail,
   sendPreOnboardingForm,
   sendDocumentRejection,
   sendExitMailApprovalRequest,
+  sendMeetingScreenshotRejection,
   sendNoResponseAlert,
   sendNoJoinNotification,
   sendOnboardingStoppedNotification,
@@ -668,6 +669,92 @@ const EXIT_MAIL_TIMER_LABEL = 'HR (Exit Mail Approval)';
 const EXIT_MAIL_TIMER_CONTEXT = employee =>
   `The system sent HR ${employee.name}'s exit email from their previous employer (in place of a relieving letter) and asked whether it is sufficient to proceed. No YES/NO reply has been received.`;
 
+// ─── Meeting screenshots (HR induction, project intro, 25-day catchup, 30/60/90-day reviews) ──────
+// Every meeting screenshot — Drive upload or email attachment — goes through handleNewFile ->
+// verifyDocument's meeting check. This builds what that check expects: the joinee's name and the
+// window the screenshot's date must fall in (from the day the meeting was due, a few days early
+// allowed, up to today).
+const MEETING_DATE_SLACK_DAYS = 3;
+const isoDay = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const plusDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+
+function meetingContext(employee, docType) {
+  const doj = new Date(employee.doj);
+  const ms = config.milestones;
+  const dueAfter = { catchupScreenshot: ms.surveyday, review30Screenshot: ms.catchup30day, review60Screenshot: ms.review60day, review90Screenshot: ms.review90day }[docType];
+  const start = dueAfter == null
+    ? plusDays(doj, -1) // induction / project intro happen on the date of joining
+    : plusDays(require('./workingDays').ensureWorkingDay(plusDays(doj, dueAfter)), -MEETING_DATE_SLACK_DAYS);
+  const now = new Date();
+  return { docType, employeeName: employee.name, windowStartISO: isoDay(start), windowEndISO: isoDay(now), todayISO: isoDay(now) };
+}
+
+// Saves a screenshot attached to an email reply into the joinee's Drive subfolder (created if
+// missing) and returns the Drive file { id, name, mimeType }, or null if it could not be saved.
+async function saveReplyAttachmentToDrive(auth, employee, rawMsg, attachment, folderName, fileName) {
+  try {
+    if (!employee.driveFolderId) return null;
+    const { google } = require('googleapis');
+    const drive = google.drive({ version: 'v3', auth });
+    let buffer;
+    if (attachment.data) buffer = Buffer.from(attachment.data, 'base64');
+    else if (attachment.attachmentId) buffer = await downloadAttachment(auth, rawMsg.id, attachment.attachmentId);
+    if (!buffer) return null;
+    const folderRes = await drive.files.list({
+      q: `name='${folderName}' and '${employee.driveFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+      fields: 'files(id)',
+    });
+    let folderId = folderRes.data.files && folderRes.data.files[0] && folderRes.data.files[0].id;
+    if (!folderId) {
+      const created = await drive.files.create({
+        requestBody: { name: folderName, mimeType: 'application/vnd.google-apps.folder', parents: [employee.driveFolderId] },
+        fields: 'id',
+      });
+      folderId = created.data.id;
+    }
+    const { Readable } = require('stream');
+    const up = await drive.files.create({
+      requestBody: { name: fileName, parents: [folderId] },
+      media: { mimeType: attachment.mimeType, body: Readable.from(buffer) },
+      fields: 'id',
+    });
+    console.log(`[Index] Saved reply screenshot for ${employee.name} → ${folderName}/${fileName}`);
+    return { id: up.data.id, name: fileName, mimeType: attachment.mimeType };
+  } catch (err) {
+    console.warn(`[Index] Could not save reply screenshot for ${employee.name}: ${err.message}`);
+    return null;
+  }
+}
+
+// Runs a screenshot that arrived by email through the normal verification (handleNewFile) and calls
+// onValid() only once it has been ACCEPTED. If Gemini/Drive is temporarily down (handleNewFile returns
+// false) it retries every 3 minutes, up to 5 times, then tells the recruiter to resend.
+async function verifyReplyScreenshot(auth, employee, file, subfolderHint, docType, onValid, attempt = 0) {
+  const done = await handleNewFile(auth, employee, file, subfolderHint, { docType });
+  if (done !== false) {
+    const r = employee.verificationResults && employee.verificationResults[docType];
+    if (r && r.valid === true) {
+      await onValid();
+      if (attempt > 0) {
+        await uploadChecklist(auth, employee.driveFolderId, employee.checklist).catch(() => {});
+        saveState(employee.employeeId, snapshotEmployee(employee));
+      }
+    }
+    return;
+  }
+  if (attempt >= 5) {
+    await sendMeetingScreenshotRejection(employee, MEETING_SCREENSHOTS[docType].label,
+      'The screenshot could not be checked because the verification service was unavailable.',
+      'please reply again with the screenshot attached').catch(() => {});
+    return;
+  }
+  const t = setTimeout(() => {
+    verifyReplyScreenshot(auth, employee, file, subfolderHint, docType, onValid, attempt + 1)
+      .catch(err => console.warn(`[Index] Screenshot retry failed for ${employee.name}: ${err.message}`));
+  }, 3 * 60 * 1000);
+  if (t && t.unref) t.unref();
+}
+
 // ─── Handler: new file detected in Drive folder ────────────────────────────────
 // Internal files the engine creates — never treat as employee documents
 const INTERNAL_FILE_PREFIXES = [
@@ -798,7 +885,7 @@ function processedFileKey(fileId, subfolderHint) {
   return subfolderHint ? `${fileId}::${subfolderHint}` : fileId;
 }
 
-async function handleNewFile(auth, employee, file, subfolderHint) {
+async function handleNewFile(auth, employee, file, subfolderHint, opts = {}) {
   // Skip folders — only process actual files
   if (file.mimeType === 'application/vnd.google-apps.folder') {
     return true;
@@ -819,9 +906,10 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
   ].includes(file.mimeType) || /\.(xlsx|xls|xlsm|xltx|xltm)$/i.test(file.name || '');
 
   // Native Google Sheets/Docs and Excel workbooks are engine work products, not employee documents.
-  if (file.mimeType === 'application/vnd.google-apps.spreadsheet' ||
-      file.mimeType === 'application/vnd.google-apps.document' ||
-      isExcelWorkbook) {
+  // Any native Google file (Sheets, Docs, Forms, Slides, Drawings, shortcuts...) is an engine work
+  // product, not an employee document. Google Forms in particular (the day-23 survey) cannot be
+  // downloaded, so trying to verify one failed and was retried every minute, forever.
+  if ((file.mimeType || '').startsWith('application/vnd.google-apps.') || isExcelWorkbook) {
     console.log(`[Index] Skipping non-verification workbook/document: ${file.name}`);
     return true;
   }
@@ -853,7 +941,7 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
   // Classify document type — subfolder is authoritative, then content, then filename
   let docType;
   try {
-    docType = await detectDocType(auth, file.id, file.name, file.mimeType, subfolderHint);
+    docType = opts.docType || await detectDocType(auth, file.id, file.name, file.mimeType, subfolderHint);
   } catch (err) {
     releaseFileLock();
     if (err.serviceUnavailable) {
@@ -907,7 +995,8 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
   console.log(`[Index] Verifying ${file.name} for ${employee.name}`);
   let result;
   try {
-    result = await verifyDocument(auth, file.id, file.name, file.mimeType, subfolderHint);
+    result = await verifyDocument(auth, file.id, file.name, file.mimeType, subfolderHint,
+      MEETING_SCREENSHOTS[docType] ? meetingContext(employee, docType) : (opts.docType ? { docType } : undefined));
   } catch (err) {
     if (err.serviceUnavailable) {
       // Temporary outage — retried by the poller on the next pass; no email and no activity-log spam
@@ -918,6 +1007,16 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
     }
     releaseFileLock();
     return false; // signal caller to remove from seen-files so it can be retried
+  }
+
+  // The same image cannot prove two different meetings
+  if (MEETING_SCREENSHOTS[docType] && result.valid && result.imageHash) {
+    const other = Object.entries(employee.verificationResults || {}).find(([k, v]) => k !== docType && MEETING_SCREENSHOTS[k] && v && v.valid === true && v.imageHash === result.imageHash);
+    if (other) {
+      result.valid = false;
+      result.failureReasons = [`This is the same image already accepted for the ${MEETING_SCREENSHOTS[other[0]].label} meeting — each meeting needs its own screenshot.`];
+      result.summary = result.failureReasons[0];
+    }
   }
 
   // Always accumulate verification results for the report (pass or fail)
@@ -933,6 +1032,7 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
         summary: result.valid
           ? (result.summary || 'Verification successful')
           : (result.failureReasons ? result.failureReasons.join('; ') : 'Verification failed'),
+        ...(result.imageHash ? { imageHash: result.imageHash } : {}),
       };
 
   // Sheet: mark documents received
@@ -969,7 +1069,7 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
     }
 
     // Cancel any pending no-response timer for this doc type
-    if (employee.noResponseTimers[docType]) {
+    if (employee.noResponseTimers && employee.noResponseTimers[docType]) {
       employee.noResponseTimers[docType].stop();
       delete employee.noResponseTimers[docType];
     }
@@ -979,8 +1079,9 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
     // If a rejection was previously issued for any doc, clear the "Documents not ok" sheet row
     await markDocumentsVerifiedOk(auth, employee).catch(() => {});
 
-    // Extract structured data from the verified doc — await so data is ready before t9 sheet creation
-    try {
+    // Extract structured data from the verified doc — await so data is ready before t9 sheet creation.
+    // (Meeting screenshots carry no extractable personal data.)
+    if (!MEETING_SCREENSHOTS[docType]) try {
       const extracted = await extractDocumentData(auth, file.id, file.name, file.mimeType, subfolderHint);
       if (extracted && extracted.docType && extracted.fields) {
         employee.extractedData = employee.extractedData || {};
@@ -1000,6 +1101,17 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
     } catch (err) {
       console.warn(`[Index] Extraction failed for ${file.name}: ${err.message}`);
     }
+  } else if (MEETING_SCREENSHOTS[docType]) {
+    // Meeting screenshots come from the recruiter, not the joinee — tell the recruiter, nobody else
+    const reason = result.failureReasons ? result.failureReasons.join('; ') : 'Verification failed';
+    console.log(`[Index] ✗ ${file.name} (${MEETING_SCREENSHOTS[docType].label} screenshot) not accepted: ${reason}`);
+    activityLog.log(employee, 'meeting_screenshot_rejected', `${docType} — ${file.name} — ${reason}`);
+    const where = docType === 'inductionScreenshot' ? 'upload it to the HR_Induction_Screenshot folder in the joinee\'s Drive folder, or reply again to the confirmation email with the screenshot attached'
+      : docType === 'projectIntroScreenshot' ? 'upload it to the Project_Intro_Screenshot folder in the joinee\'s Drive folder'
+      : 'reply again to the original email with "Confirmed" and the corrected screenshot attached';
+    await sendMeetingScreenshotRejection(employee, MEETING_SCREENSHOTS[docType].label, reason, where).catch(err =>
+      console.warn(`[Index] Meeting screenshot rejection email failed for ${employee.name}: ${err.message}`)
+    );
   } else {
     const reason = result.failureReasons ? result.failureReasons.join('; ') : 'Verification failed';
     console.log(`[Index] ✗ ${file.name} failed: ${reason}`);
@@ -1043,8 +1155,11 @@ async function handleNewFile(auth, employee, file, subfolderHint) {
   await uploadChecklist(auth, employee.driveFolderId, employee.checklist);
   saveState(employee.employeeId, snapshotEmployee(employee));
 
-  // Trigger next steps based on which document just passed (only if valid)
-  if (result.valid) {
+  // Trigger next steps based on which document just passed (only if valid). The post-DOJ meeting
+  // screenshots (25-day catchup, 30/60/90-day reviews) have their own follow-up in handleReply and
+  // must not re-run the onboarding-phase steps.
+  const POST_DOJ_MEETINGS = ['catchupScreenshot', 'review30Screenshot', 'review60Screenshot', 'review90Screenshot'];
+  if (result.valid && !POST_DOJ_MEETINGS.includes(docType)) {
     await triggerNextStep(auth, employee, docType);
   }
   return true;
@@ -1844,12 +1959,9 @@ async function handleReply(auth, classified, rawMsg) {
       break;
 
     case 'induction_confirmed': {
-      // "Confirmed" alone only proves the induction session happened — the email sent to
-      // the recruiter explicitly promised the checklist "will only turn green after the
-      // screenshot is uploaded, not just after this reply". t34 (screenshot verified) must
-      // stay gated on an actual screenshot, whether it arrives via Drive upload (the normal
-      // path, see docType === 'inductionScreenshot' above) or attached to this very reply
-      // (handled here, mirroring the working catchup25_complete pattern below).
+      // "Confirmed" alone only proves the induction session happened. t34 (screenshot verified)
+      // stays gated on an ACCEPTED screenshot, whether it arrives by Drive upload or attached to
+      // this reply — both go through the same verification (handleNewFile -> meeting check).
       markAndLog(employee, 't33');
       activityLog.log(employee, 'induction_confirmed');
       if (employee.replyTimers && employee.replyTimers.induction) {
@@ -1865,43 +1977,13 @@ async function handleReply(auth, classified, rawMsg) {
         console.warn(`[Index] "Confirmed" reply for ${employee.name}'s HR induction had no screenshot attached — t34 stays pending until one is uploaded to HR_Induction_Screenshot`);
         break;
       }
-
-      try {
-        const { google } = require('googleapis');
-        const drive = google.drive({ version: 'v3', auth });
-        let buffer;
-        if (screenshot.data) {
-          buffer = Buffer.from(screenshot.data, 'base64');
-        } else if (screenshot.attachmentId) {
-          buffer = await downloadAttachment(auth, rawMsg.id, screenshot.attachmentId);
-        }
-        if (buffer && employee.driveFolderId) {
-          const subfolderRes = await drive.files.list({
-            q: `name='HR_Induction_Screenshot' and '${employee.driveFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
-            fields: 'files(id)',
-          });
-          let targetFolderId = subfolderRes.data.files && subfolderRes.data.files[0] && subfolderRes.data.files[0].id;
-          if (!targetFolderId) {
-            const created = await drive.files.create({
-              requestBody: { name: 'HR_Induction_Screenshot', mimeType: 'application/vnd.google-apps.folder', parents: [employee.driveFolderId] },
-              fields: 'id',
-            });
-            targetFolderId = created.data.id;
-          }
-          const { Readable } = require('stream');
-          await drive.files.create({
-            requestBody: { name: screenshot.filename, parents: [targetFolderId] },
-            media: { mimeType: screenshot.mimeType, body: Readable.from(buffer) },
-            fields: 'id',
-          });
-          console.log(`[Index] Saved HR induction screenshot for ${employee.name} → HR_Induction_Screenshot/${screenshot.filename}`);
-          // Reuse the same completion path a real Drive upload would take (marks t34,
-          // uploads checklist, calls markHRInductionDone, and the t42 both-screenshots check).
-          await triggerNextStep(auth, employee, 'inductionScreenshot');
-        }
-      } catch (err) {
-        console.warn(`[Index] Could not save HR induction screenshot for ${employee.name}: ${err.message} — t34 stays pending`);
+      const file = await saveReplyAttachmentToDrive(auth, employee, rawMsg, screenshot, 'HR_Induction_Screenshot', screenshot.filename);
+      if (!file) {
+        console.warn(`[Index] Could not save HR induction screenshot for ${employee.name} — t34 stays pending`);
+        break;
       }
+      // handleNewFile marks t34 / completes the DOJ phase itself once the screenshot is accepted
+      await verifyReplyScreenshot(auth, employee, file, 'HR_Induction_Screenshot', 'inductionScreenshot', async () => {});
       break;
     }
 
@@ -1915,8 +1997,8 @@ async function handleReply(auth, classified, rawMsg) {
       break;
 
     case 'catchup25_complete': {
-      // HR spec requires the "Confirmed" reply to carry a meeting screenshot —
-      // only mark t64 once an image attachment is found and saved to Drive.
+      // The "Confirmed" reply must carry a meeting screenshot, and the screenshot must be ACCEPTED
+      // (shows the meeting, joinee name or title, right date) before t64 is marked.
       const IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.heic', '.webp'];
       const attachments = (rawMsg && rawMsg.attachments) || [];
       const screenshot = attachments.find(a => IMAGE_EXTS.some(ext => (a.filename || '').toLowerCase().endsWith(ext)));
@@ -1925,48 +2007,20 @@ async function handleReply(auth, classified, rawMsg) {
         console.warn(`[Index] "Confirmed" reply for ${employee.name}'s 25-day catchup had no screenshot attached — not marking t64 yet`);
         break;
       }
-
-      try {
-        const { google } = require('googleapis');
-        const drive = google.drive({ version: 'v3', auth });
-        let buffer;
-        if (screenshot.data) {
-          buffer = Buffer.from(screenshot.data, 'base64');
-        } else if (screenshot.attachmentId) {
-          buffer = await downloadAttachment(auth, rawMsg.id, screenshot.attachmentId);
-        }
-        if (buffer && employee.driveFolderId) {
-          const subfolderRes = await drive.files.list({
-            q: `name='${config.catchupScreenshotSubfolder}' and '${employee.driveFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`,
-            fields: 'files(id)',
-          });
-          let targetFolderId = subfolderRes.data.files && subfolderRes.data.files[0] && subfolderRes.data.files[0].id;
-          if (!targetFolderId) {
-            const created = await drive.files.create({
-              requestBody: { name: config.catchupScreenshotSubfolder, mimeType: 'application/vnd.google-apps.folder', parents: [employee.driveFolderId] },
-              fields: 'id',
-            });
-            targetFolderId = created.data.id;
-          }
-          const { Readable } = require('stream');
-          await drive.files.create({
-            requestBody: { name: screenshot.filename, parents: [targetFolderId] },
-            media: { mimeType: screenshot.mimeType, body: Readable.from(buffer) },
-            fields: 'id',
-          });
-          console.log(`[Index] Saved 25-day catchup screenshot for ${employee.name} → ${config.catchupScreenshotSubfolder}/${screenshot.filename}`);
-        }
-      } catch (err) {
-        console.warn(`[Index] Could not save 25-day catchup screenshot for ${employee.name}: ${err.message}`);
+      const file = await saveReplyAttachmentToDrive(auth, employee, rawMsg, screenshot, config.catchupScreenshotSubfolder, screenshot.filename);
+      if (!file) {
+        console.warn(`[Index] Could not save 25-day catchup screenshot for ${employee.name} — not marking t64`);
+        break;
       }
-
-      markAndLog(employee, 't64');
-      activityLog.log(employee, '25_day_catchup_confirmed');
-      console.log(`[Index] 25-day catchup confirmed (with screenshot) for ${employee.name}`);
-      saveState(employee.employeeId, snapshotEmployee(employee));
-      // If the tracking sheet is already filled, send the summary now rather than at the next check
-      await checkCatchup25Now(employee).catch(err =>
-        console.warn(`[Index] 25-day catchup check after "Confirmed" failed for ${employee.name}: ${err.message}`));
+      await verifyReplyScreenshot(auth, employee, file, config.catchupScreenshotSubfolder, 'catchupScreenshot', async () => {
+        markAndLog(employee, 't64');
+        activityLog.log(employee, '25_day_catchup_confirmed');
+        console.log(`[Index] 25-day catchup confirmed (screenshot accepted) for ${employee.name}`);
+        saveState(employee.employeeId, snapshotEmployee(employee));
+        // If the tracking sheet is already filled, send the summary now rather than at the next check
+        await checkCatchup25Now(employee).catch(err =>
+          console.warn(`[Index] 25-day catchup check after "Confirmed" failed for ${employee.name}: ${err.message}`));
+      });
       break;
     }
 
@@ -2003,8 +2057,8 @@ async function handleReply(auth, classified, rawMsg) {
     }
 
     case 'review_summary_shared': {
-      // Step 4 (HR spec) — recruiter replies "Confirmed" + a screenshot to confirm
-      // they shared the review summary with the joinee.
+      // Step 4 (HR spec) — recruiter replies "Confirmed" + a screenshot to confirm the review
+      // call / summary. The screenshot must be ACCEPTED (meeting, joinee name or title, right date).
       const dayMarkMatch = (rawMsg.subject || '').match(/(\d+)-Day Review Summary/i);
       const dayMark = dayMarkMatch ? parseInt(dayMarkMatch[1], 10) : null;
       const IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.heic', '.webp'];
@@ -2019,11 +2073,17 @@ async function handleReply(auth, classified, rawMsg) {
         console.warn(`[Index] review_summary_shared reply for ${employee.name}'s ${dayMark}-day review had no screenshot attached — not marking done yet`);
         break;
       }
-
+      const file = await saveReplyAttachmentToDrive(auth, employee, rawMsg, screenshot, config.catchupScreenshotSubfolder, `${dayMark}day_${screenshot.filename}`);
+      if (!file) {
+        console.warn(`[Index] Could not save ${dayMark}-day review screenshot for ${employee.name} — not marking done`);
+        break;
+      }
       const taskId = dayMark === 30 ? 't73' : dayMark === 60 ? 't76' : 't79';
-      markAndLog(employee, taskId);
-      activityLog.log(employee, `${dayMark}_day_review_summary_shared`);
-      console.log(`[Index] Recruiter confirmed sharing ${dayMark}-day review summary (with screenshot) for ${employee.name}`);
+      await verifyReplyScreenshot(auth, employee, file, config.catchupScreenshotSubfolder, `review${dayMark}Screenshot`, async () => {
+        markAndLog(employee, taskId);
+        activityLog.log(employee, `${dayMark}_day_review_summary_shared`);
+        console.log(`[Index] Recruiter confirmed ${dayMark}-day review (screenshot accepted) for ${employee.name}`);
+      });
       break;
     }
 

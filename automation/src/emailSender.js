@@ -290,6 +290,27 @@ async function sendOfficialEmailAccessTest(employee) {
   });
 }
 
+// Meeting-screenshot rejection — goes to the RECRUITER (who supplies these screenshots), never the joinee.
+// `where` says how to resend, e.g. 'the HR_Induction_Screenshot folder in the joinee's Drive folder'.
+async function sendMeetingScreenshotRejection(employee, meetingLabel, reason, where) {
+  const { name, employeeId } = employee;
+  const co = esc(process.env.COMPANY_NAME || '');
+  const to = (employee.contacts && employee.contacts.recruiterEmail) || process.env.HR_EMAIL;
+  if (!to) return;
+  return sendEmail({
+    to,
+    subject: `Meeting Screenshot Not Accepted — ${meetingLabel} for ${name} (${employeeId})`,
+    html: `
+      <p>Hi,</p>
+      <p>The screenshot submitted as proof of the <strong>${esc(meetingLabel)}</strong> meeting for <strong>${esc(name)}</strong> (${esc(employeeId)}) was not accepted:</p>
+      <blockquote style="border-left:4px solid #e53935;padding:8px 16px;color:#555;">${esc(reason)}</blockquote>
+      <p>The screenshot must show the meeting itself, with <strong>${esc(name)}</strong>'s name or the meeting title visible, and a <strong>date</strong> that matches when the meeting was held.</p>
+      <p>Please send a corrected screenshot${where ? ` — ${esc(where)}` : ''}. The milestone stays pending until an accepted screenshot is received.</p>
+      <p>Regards,<br/>${co} HR Automation</p>
+    `,
+  });
+}
+
 // Relieving-letter approval request — sent to HR when the joinee's relieving-letter upload
 // is not a verifiable relieving/experience letter (typically an exit email from the previous
 // employer). The joinee's file is attached; HR replies YES (sufficient) or NO. The reporting
@@ -1573,6 +1594,7 @@ module.exports = {
   sendPreOnboardingForm,
   sendDocumentRejection,
   sendExitMailApprovalRequest,
+  sendMeetingScreenshotRejection,
   sendDocumentReminder,
   sendPreOnboardingReminder,
   sendNoResponseAlert,

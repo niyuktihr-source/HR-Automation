@@ -422,6 +422,11 @@ app.post('/employee', employeeCreateLimiter, async (req, res) => {
 //   name, employeeId, personalEmail, doj, isFresher, managerName, managerEmail,
 //   itEmail, officeLocation, assetRequired, designation, team, driveFolderId,
 //   recruiterEmail, notes
+const escHtml = v => String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+// Employee IDs whose setup is still running (answered 202 already) — a double submit gets 409
+const _recruiterFormInFlight = new Set();
+
 app.post('/recruiter-form', employeeCreateLimiter, async (req, res) => {
   const {
     name, employeeId, personalEmail, phoneNumber, doj, isFresher,
@@ -458,7 +463,7 @@ app.post('/recruiter-form', employeeCreateLimiter, async (req, res) => {
     return res.status(400).json({ error: 'No valid Drive folder ID — provide one in the form or set ONBOARDING_ROOT_FOLDER_ID in .env.' });
   }
 
-  if (_employeeRegistry[employeeId]) {
+  if (_employeeRegistry[employeeId] || _recruiterFormInFlight.has(employeeId)) {
     return res.status(409).json({ error: `Employee ${employeeId} is already registered.` });
   }
 
@@ -485,13 +490,37 @@ app.post('/recruiter-form', employeeCreateLimiter, async (req, res) => {
 
   console.log(`[Webhook] /recruiter-form — received submission for ${name} (${employeeId}), DOJ: ${doj}, assetRequired: ${JSON.stringify(assetRequired)} → stored as: ${JSON.stringify(assetRequired || 'Unaware — To be confirmed')}`);
 
-  try {
-    if (_onNewEmployee) await _onNewEmployee(employeeData);
-    res.status(201).json({ message: `Onboarding started for ${name}` });
-  } catch (err) {
-    console.error('[Webhook] /recruiter-form error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
+  // Setting a joinee up (Drive folders, sheets, welcome email, watchers) can take longer than the
+  // reverse proxy's timeout (nginx answers 504 after ~60s), which made the form script email the
+  // recruiter "Onboarding Trigger Failed" even though the engine carried on and finished. So: reserve
+  // the employee ID, answer 202 straight away, and do the setup in the background. A setup failure
+  // is reported by email instead of through this response.
+  _recruiterFormInFlight.add(employeeId);
+  res.status(202).json({ message: `Onboarding accepted for ${name} — setup is running` });
+  (async () => {
+    try {
+      if (_onNewEmployee) await _onNewEmployee(employeeData);
+      console.log(`[Webhook] /recruiter-form — onboarding set up for ${name} (${employeeId})`);
+    } catch (err) {
+      console.error('[Webhook] /recruiter-form error:', err.message);
+      try {
+        const { sendEmail } = require('./emailSender');
+        await sendEmail({
+          to: [recruiterEmail, process.env.HR_EMAIL].filter(Boolean).filter((a, i, all) => all.indexOf(a) === i).join(', '),
+          subject: `Onboarding Setup Failed — ${name} (${employeeId})`,
+          html: `<p>Hi,</p>
+            <p>The onboarding setup for <strong>${escHtml(name)}</strong> (${escHtml(employeeId)}) started but failed:</p>
+            <blockquote style="border-left:4px solid #e53935;padding:8px 16px;color:#555;">${escHtml(err.message)}</blockquote>
+            <p>Please contact the HR automation team. Do not resubmit the form until they confirm the joinee was not registered.</p>
+            <p>Regards,<br/>${escHtml(process.env.COMPANY_NAME || '')} HR Automation</p>`,
+        });
+      } catch (mailErr) {
+        console.error('[Webhook] Could not send setup-failed email:', mailErr.message);
+      }
+    } finally {
+      _recruiterFormInFlight.delete(employeeId);
+    }
+  })();
 });
 
 // ─── Pre-onboarding personal details from form submit ────────────────────────
@@ -1208,6 +1237,40 @@ app.post('/mark-task/:employeeId/:taskId', markTaskLimiter, (req, res) => {
     return res.redirect(`/status/${employeeId}`);
   }
   res.json({ ok: true, message: `Task ${taskId} marked done for ${emp.name}.`, label });
+});
+
+// POST /accept-document/:employeeId/:docType
+// Header: x-mark-task-secret: <MARK_TASK_SECRET>   (same secret as /mark-task)
+// Marks an existing verification result as accepted by HR (e.g. a wrong rejection left over from an
+// older prompt). Works on the live in-memory employee, so the running engine cannot overwrite it.
+// Does not touch checklist tasks — use /mark-task for those.
+app.post('/accept-document/:employeeId/:docType', markTaskLimiter, (req, res) => {
+  const secret = process.env.MARK_TASK_SECRET;
+  if (!secret) {
+    return res.status(503).json({ error: 'Disabled — set MARK_TASK_SECRET in .env to enable.' });
+  }
+  const provided = req.headers['x-mark-task-secret'] || (req.body && req.body.secret) || '';
+  if (!safeCompare(provided, secret)) {
+    return res.status(401).json({ error: 'Invalid or missing secret token.' });
+  }
+  const { employeeId, docType } = req.params;
+  if (!isValidEmployeeId(employeeId)) return res.status(400).json({ error: 'Invalid employeeId format.' });
+  if (!/^[A-Za-z0-9]{2,40}$/.test(docType)) return res.status(400).json({ error: 'Invalid docType format.' });
+  const emp = _employeeRegistry[employeeId];
+  if (!emp) return res.status(404).json({ error: `Employee ${employeeId} not found.` });
+  const results = emp.verificationResults || {};
+  if (!Object.prototype.hasOwnProperty.call(results, docType)) {
+    return res.status(404).json({ error: `No verification result "${docType}" for ${employeeId}. Existing: ${Object.keys(results).join(', ') || 'none'}.` });
+  }
+  const previous = results[docType];
+  results[docType] = { valid: true, manual: true, summary: 'Accepted manually by HR' };
+  try {
+    const { log } = require('./activityLog');
+    log(emp, 'document_accepted_manually', `${docType} (was: ${previous && previous.valid === false ? 'rejected' : 'pending'}) — via /accept-document`);
+  } catch { /* best-effort */ }
+  if (_saveState) { try { _saveState(employeeId, emp); } catch (e) { console.warn(`[Webhook] accept-document: state save failed for ${employeeId}:`, e.message); } }
+  console.log(`[Webhook] Document ${docType} manually accepted for ${employeeId}`);
+  res.json({ ok: true, message: `${docType} accepted for ${emp.name}.` });
 });
 
 // ─── Start the server ──────────────────────────────────────────────────────────

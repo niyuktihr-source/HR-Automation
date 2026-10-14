@@ -48,14 +48,17 @@ try {
   if (state.verificationResults && Object.keys(state.verificationResults).length > 0) {
     console.log('\nVerification Results:');
     for (const [doc, vr] of Object.entries(state.verificationResults)) {
-      console.log(`  ${doc}: ${vr.passed ? 'PASS' : 'FAIL'} — ${vr.reason || ''}`);
+      // The engine stores { valid, summary } ('passed'/'reason' are the legacy names); valid:null = awaiting approval
+      const ok = vr.valid !== undefined ? vr.valid : vr.passed;
+      const label = ok === true ? 'PASS' : ok === null ? 'PENDING' : 'FAIL';
+      console.log(`  ${doc}: ${label}${vr.manual ? ' (manual)' : ''} — ${vr.summary || vr.reason || ''}`);
     }
   }
 
   if (state.replyTimerExpiry && Object.keys(state.replyTimerExpiry).length > 0) {
     console.log('\nReply Timer Expiry:');
     for (const [key, ts] of Object.entries(state.replyTimerExpiry)) {
-      console.log(`  ${key}: ${ts}`);
+      console.log(`  ${key}: ${typeof ts === 'object' && ts ? (ts.expiresAt || JSON.stringify(ts)) : ts}`);
     }
   }
 

@@ -65,50 +65,6 @@ Check definitions:
 - "aletheaCompanyName": The name "Alethea" or "Alethea Communications Technologies" is visible anywhere — in the letterhead, logo, body, or footer.
 Only set valid=true if ALL four checks pass.`,
 
-  inductionScreenshot: `You are an HR automation assistant verifying a screenshot of an HR Induction meeting to confirm that the new employee attended their HR induction session on their Date of Joining.
-
-Analyse the screenshot and respond ONLY with a JSON object in this exact format:
-{
-  "valid": true/false,
-  "docType": "HR Induction Screenshot",
-  "checks": {
-    "isMeetingOrVideoCall": true/false,
-    "participantsOrNamesVisible": true/false,
-    "meetingContextEvident": true/false
-  },
-  "failureReasons": ["list any failed checks in plain English"],
-  "summary": "one sentence summary"
-}
-
-Check definitions:
-- "isMeetingOrVideoCall": The image shows a video call, meeting room, or virtual meeting interface (Google Meet, Zoom, Teams, etc.) OR a physical meeting/induction session photo. Set true if ANY meeting evidence is visible.
-- "participantsOrNamesVisible": At least one participant name, tile, or person is visible. Set true even if only one name/face is visible.
-- "meetingContextEvident": There is some indication this is a work meeting — meeting platform UI, a presentation, office setting, people gathered, or meeting title visible anywhere.
-
-Be LENIENT: This is just attendance confirmation. If the screenshot reasonably shows someone was in a meeting or video call, set valid=true. Only set valid=false if the image is clearly not a meeting (e.g. a selfie, document scan, random photo).`,
-
-  projectIntroScreenshot: `You are an HR automation assistant verifying a screenshot of a Project Introduction meeting to confirm that the new employee attended their project intro session on their Date of Joining.
-
-Analyse the screenshot and respond ONLY with a JSON object in this exact format:
-{
-  "valid": true/false,
-  "docType": "Project Intro Screenshot",
-  "checks": {
-    "isMeetingOrVideoCall": true/false,
-    "participantsOrNamesVisible": true/false,
-    "meetingContextEvident": true/false
-  },
-  "failureReasons": ["list any failed checks in plain English"],
-  "summary": "one sentence summary"
-}
-
-Check definitions:
-- "isMeetingOrVideoCall": The image shows a video call, meeting room, or virtual meeting interface (Google Meet, Zoom, Teams, etc.) OR a physical meeting/induction session photo. Set true if ANY meeting evidence is visible.
-- "participantsOrNamesVisible": At least one participant name, tile, or person is visible. Set true even if only one name/face is visible.
-- "meetingContextEvident": There is some indication this is a work meeting — meeting platform UI, a presentation, office setting, people gathered, or meeting title visible anywhere.
-
-Be LENIENT: This is just attendance confirmation. If the screenshot reasonably shows someone was in a meeting or video call, set valid=true. Only set valid=false if the image is clearly not a meeting (e.g. a selfie, document scan, random photo).`,
-
   passportPhoto: `You are verifying a passport-size photograph for HR records. Check ALL of the following and respond with a JSON object:
 {
   "valid": true/false,
@@ -121,7 +77,7 @@ Be LENIENT: This is just attendance confirmation. If the screenshot reasonably s
   "failureReasons": ["list any failed checks in plain English"],
   "summary": "one sentence summary"
 }
-Only set valid=true if ALL three checks pass.`,
+Only set valid=true if ALL three checks pass. These three checks are the ONLY criteria: do NOT fail the photo for clothing (casual clothes, t-shirts, text or logos on clothing), expression, pose, hair, glasses, jewellery, lighting style, or how "professional" it looks.`,
 
   payslip: `You are verifying a payslip or salary slip document. Check ALL of the following and respond with a JSON object:
 {
@@ -572,9 +528,116 @@ function callWithRetry(fn, maxRetries = 4) {
   return retryTransient(fn, { maxRetries, label: 'Gemini' });
 }
 
+// ─── Meeting screenshots ──────────────────────────────────────────────────────
+// HR induction, project intro, 25-day catchup and the 30/60/90-day review calls are each proved by
+// a screenshot. Gemini only REPORTS what is visible (meeting UI, names, title, date); the decision
+// is made here in code so it is strict and predictable: (1) it must show a meeting, (2) the joinee's
+// name or a title matching this meeting must be visible, and (3) a date must be visible and fall in
+// the expected window. The same check runs whether the image came by Drive upload or email reply.
+const MEETING_SCREENSHOTS = {
+  inductionScreenshot:    { label: 'HR Induction',         titleRx: /induct|onboard|welcome|\bHR\b/i },
+  projectIntroScreenshot: { label: 'Project Introduction', titleRx: /project|intro|kick.?off|walk.?through/i },
+  catchupScreenshot:      { label: '25th-Day Catchup',     titleRx: /catch.?up|check.?in|feedback|\b25/i },
+  review30Screenshot:     { label: '30-Day Review',        titleRx: /review|catch.?up|check.?in|feedback|\b30/i },
+  review60Screenshot:     { label: '60-Day Review',        titleRx: /review|check.?in|feedback|\b60/i },
+  review90Screenshot:     { label: '90-Day Review',        titleRx: /review|check.?in|feedback|\b90/i },
+};
+
+function meetingFactsPrompt(label, todayISO) {
+  return `You are reading a screenshot or photo that was submitted as proof that a "${label}" meeting took place with a new employee. Do NOT judge whether it is acceptable — only report what is visibly in the image. Respond ONLY with a JSON object in exactly this format:
+{
+  "isMeetingOrCall": true/false,
+  "legible": true/false,
+  "participantNames": ["every participant name visible"],
+  "meetingTitle": "the meeting title text if visible, else null",
+  "visibleDate": "YYYY-MM-DD or null",
+  "dateSource": "where the date was read from (calendar header, chat timestamp, clock, title...) or null",
+  "summary": "one sentence describing the image"
+}
+Rules:
+- "isMeetingOrCall": true for a video-call interface (Google Meet, Zoom, Teams...), a meeting room / in-person meeting photo, or a calendar entry/invite for a meeting. false for a selfie, document scan, or unrelated photo.
+- "visibleDate": only a date that is actually printed in the image (calendar day, message timestamp with a date, system clock/date, a date in the title). Today is ${todayISO}; if only day and month are shown, pick the year that puts the date closest to today without being after it. If no date is printed, use null. Never guess from the time of day alone.`;
+}
+
+function normName(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// Pure decision function — facts from Gemini + expectations from the app -> verification result.
+function evaluateMeetingScreenshot(facts, docType, ctx = {}) {
+  const meta = MEETING_SCREENSHOTS[docType];
+  const f = facts || {};
+  const reasons = [];
+
+  const isMeeting = f.isMeetingOrCall === true && f.legible !== false;
+  if (!isMeeting) reasons.push('The image does not clearly show a meeting or video call.');
+
+  const tokens = normName(ctx.employeeName).split(' ').filter(t => t.length >= 3);
+  const seen = (Array.isArray(f.participantNames) ? f.participantNames : []).map(normName);
+  const nameOk = tokens.length > 0 && tokens.some(t => seen.some(n => n.includes(t)));
+  const titleOk = meta.titleRx.test(String(f.meetingTitle || ''));
+  if (!nameOk && !titleOk) {
+    reasons.push(`Neither ${ctx.employeeName ? ctx.employeeName + "'s name" : "the joinee's name"} nor a "${meta.label}" meeting title is visible in the screenshot.`);
+  }
+
+  let dateOk = true;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(f.visibleDate || ''));
+  if (!m) {
+    dateOk = false;
+    reasons.push('No date is visible in the screenshot — include the meeting date (e.g. the calendar entry, a dated chat message, or the date on the screen).');
+  } else if (ctx.windowStartISO && ctx.windowEndISO) {
+    const d = f.visibleDate;
+    if (d < ctx.windowStartISO) {
+      dateOk = false;
+      reasons.push(`The screenshot is dated ${d}, which is before this meeting was due (on or after ${ctx.windowStartISO}).`);
+    } else if (d > ctx.windowEndISO) {
+      dateOk = false;
+      reasons.push(`The screenshot is dated ${d}, which is in the future.`);
+    }
+  }
+
+  const valid = reasons.length === 0;
+  return {
+    valid,
+    docType: `${meta.label} Screenshot`,
+    checks: { isMeetingOrCall: isMeeting, nameOrTitleVisible: nameOk || titleOk, dateInExpectedWindow: dateOk },
+    failureReasons: reasons,
+    summary: valid ? (f.summary || `${meta.label} screenshot accepted.`) : reasons[0],
+  };
+}
+
+async function verifyMeetingScreenshot(fileId, filename, mimeType, auth, docType, ctx) {
+  const genAI = getGenAI();
+  if (!genAI) {
+    return { valid: false, docType: `${MEETING_SCREENSHOTS[docType].label} Screenshot`, checks: {}, failureReasons: ['Gemini API key not configured — screenshot requires manual review.'], summary: 'Verification skipped: GEMINI_API_KEY not set.' };
+  }
+  let tempPath = null;
+  try {
+    const { tempPath: tp, downloadMime } = await downloadDriveFile(auth, fileId, mimeType);
+    tempPath = tp;
+    const { base64, mediaType } = fileToBase64(tp, downloadMime);
+    const imageHash = require('crypto').createHash('sha256').update(Buffer.from(base64, 'base64')).digest('hex');
+    const model = genAI.getGenerativeModel({ model: config.geminiModel });
+    const todayISO = (ctx && ctx.todayISO) || new Date().toISOString().slice(0, 10);
+    const result_raw = await callWithRetry(() => model.generateContent([
+      meetingFactsPrompt(MEETING_SCREENSHOTS[docType].label, todayISO),
+      { inlineData: { data: base64, mimeType: mediaType } },
+    ]));
+    const raw = result_raw.response.text().trim();
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('Gemini returned non-JSON response: ' + raw);
+    const result = evaluateMeetingScreenshot(JSON.parse(jsonMatch[0]), docType, ctx || {});
+    result.imageHash = imageHash;
+    console.log(`[Verify] ${filename} → meeting screenshot (${docType}) valid=${result.valid} | ${result.summary}`);
+    return result;
+  } finally {
+    if (tempPath && fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+  }
+}
+
 // Core verification function — returns { valid, docType, checks, failureReasons, summary }
-async function verifyDocument(auth, fileId, filename, mimeType, subfolderHint) {
-  const docType = await detectDocType(auth, fileId, filename, mimeType, subfolderHint);
+async function verifyDocument(auth, fileId, filename, mimeType, subfolderHint, context) {
+  const docType = (context && context.docType) || await detectDocType(auth, fileId, filename, mimeType, subfolderHint);
   if (!docType) {
     return {
       valid: false,
@@ -583,6 +646,10 @@ async function verifyDocument(auth, fileId, filename, mimeType, subfolderHint) {
       failureReasons: [`Could not determine document type for "${filename}" — even after reading the content. Please ensure this is a valid HR document.`],
       summary: 'Unknown document type.',
     };
+  }
+
+  if (MEETING_SCREENSHOTS[docType]) {
+    return verifyMeetingScreenshot(fileId, filename, mimeType, auth, docType, context);
   }
 
   const genAI = getGenAI();
@@ -711,4 +778,4 @@ function crossCheckDocuments(extractedData) {
   return mismatches;
 }
 
-module.exports = { downloadDriveFile, verifyDocument, verifyAllDocuments, detectDocType, extractDocumentData, crossCheckDocuments };
+module.exports = { MEETING_SCREENSHOTS, evaluateMeetingScreenshot, downloadDriveFile, verifyDocument, verifyAllDocuments, detectDocType, extractDocumentData, crossCheckDocuments };

@@ -158,6 +158,18 @@ function onRecruiterFormSubmit(e) {
 
     if (response.getResponseCode() >= 200 && response.getResponseCode() < 300) {
       Logger.log('✅ Onboarding triggered successfully for ' + data.name);
+    } else if ([408, 502, 503, 504].indexOf(response.getResponseCode()) !== -1) {
+      // Gateway/proxy timeout: the engine may well have received the form and be setting the joinee
+      // up. Do NOT say "failed" — that made recruiters resubmit (which then fails as already registered).
+      Logger.log('⚠️ Gateway timeout (' + response.getResponseCode() + ') — onboarding may still be starting for ' + data.name);
+      GmailApp.sendEmail(
+        recruiterEmail,
+        'Onboarding Trigger — Please Verify — ' + (data.name || 'Unknown'),
+        'Hi,\n\nThe onboarding request for ' + (data.name || 'the new joinee') +
+        ' was sent, but the engine did not reply in time (HTTP ' + response.getResponseCode() + ').' +
+        '\n\nThe onboarding may still have started. Please do NOT resubmit the form — the HR automation team will confirm, ' +
+        'and you will receive a separate "Onboarding Setup Failed" email if the setup really failed.\n\nAlethea HR Automation'
+      );
     } else {
       Logger.log('❌ Engine returned error: ' + response.getResponseCode());
       // Send alert email to recruiter
