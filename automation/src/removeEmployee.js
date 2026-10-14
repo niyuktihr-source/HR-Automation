@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { google } = require('googleapis');
 const { decrypt, isEncryptionEnabled } = require('./encryption');
+const { checkEmployeeFolder, checkEmployeeSheet } = require('./folderGuard');
 
 const EMPLOYEES_PATH  = path.join(__dirname, '..', 'employees.json');
 const STATE_DIR       = path.join(__dirname, '..');
@@ -23,6 +24,18 @@ async function buildAuth() {
     const oAuth2 = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
     oAuth2.setCredentials(JSON.parse(fs.readFileSync(TOKEN_PATH)));
     return oAuth2;
+  } catch {
+    return null;
+  }
+}
+
+// Live name / type / parents of a Drive item, or null if it cannot be read — used to verify an item
+// really belongs to the employee before anything is trashed (see folderGuard.js).
+async function getDriveMeta(auth, fileId) {
+  try {
+    const drive = google.drive({ version: 'v3', auth });
+    const r = await drive.files.get({ fileId, fields: 'id,name,mimeType,parents,trashed' });
+    return r.data;
   } catch {
     return null;
   }
@@ -103,17 +116,24 @@ async function main() {
   // Delete status sheet from Google Drive (read fileId from state before deleting state file)
   const stateFile = path.join(STATE_DIR, `state-${id}.json`);
   let employeeFolderId = null;
+  let stateRootFolderId = null;
   if (fs.existsSync(stateFile)) {
     try {
       const raw = fs.readFileSync(stateFile, 'utf8');
       const state = (isEncryptionEnabled() && raw.includes('"ciphertext"')) ? JSON.parse(decrypt(raw)) : JSON.parse(raw);
       employeeFolderId = state.driveFolderId || null;
+      stateRootFolderId = state.rootFolderId || null;
       const sheetId = state.statusSheetId;
       if (sheetId) {
         const auth = await buildAuth();
         if (auth) {
-          await deleteDriveFile(auth, sheetId);
-          console.log(`Deleted status sheet from Drive (${sheetId})`);
+          const sheetCheck = checkEmployeeSheet({ sheetId, employeeId: id, meta: await getDriveMeta(auth, sheetId) });
+          if (sheetCheck.safe) {
+            await deleteDriveFile(auth, sheetId);
+            console.log(`Deleted status sheet from Drive (${sheetId})`);
+          } else {
+            console.warn(`Status sheet NOT deleted — safety check failed: ${sheetCheck.reason}.`);
+          }
         } else {
           console.warn('Could not authenticate with Google — status sheet NOT deleted from Drive.');
         }
@@ -144,11 +164,23 @@ async function main() {
     if (deleteFolder.toLowerCase() === 'yes') {
       const auth = await buildAuth();
       if (auth) {
-        try {
-          await deleteDriveFolder(auth, driveFolderId);
-          console.log(`Deleted Drive folder (${driveFolderId})`);
-        } catch (err) {
-          console.warn(`Could not delete Drive folder: ${err.message}`);
+        // Never trash the shared onboarding root or anything that isn't demonstrably THIS employee's folder
+        const guard = checkEmployeeFolder({
+          folderId: driveFolderId,
+          employeeId: id,
+          meta: await getDriveMeta(auth, driveFolderId),
+          rootIds: [stateRootFolderId, process.env.ONBOARDING_ROOT_FOLDER_ID, emp.driveFolderId],
+        });
+        if (!guard.safe) {
+          console.warn(`Drive folder NOT deleted — safety check failed: ${guard.reason}.`);
+          console.warn(`Delete it by hand in Google Drive if it really is this employee's folder (${driveFolderId}).`);
+        } else {
+          try {
+            await deleteDriveFolder(auth, driveFolderId);
+            console.log(`Deleted Drive folder (${driveFolderId}) — moved to Drive's Trash (restorable for ~30 days)`);
+          } catch (err) {
+            console.warn(`Could not delete Drive folder: ${err.message}`);
+          }
         }
       } else {
         console.warn('Could not authenticate with Google — Drive folder NOT deleted.');
