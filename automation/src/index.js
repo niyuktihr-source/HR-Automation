@@ -10,6 +10,7 @@ const {
   sendDocumentRejection,
   sendExitMailApprovalRequest,
   sendMeetingScreenshotRejection,
+  sendScreenshotNeeded,
   sendNoResponseAlert,
   sendNoJoinNotification,
   sendOnboardingStoppedNotification,
@@ -1310,10 +1311,13 @@ async function triggerNextStep(auth, employee, docType) {
       await uploadChecklist(auth, employee.driveFolderId, checklist);
     }
 
-    // t36: Send seat allocation confirmation request to Admin
+    // Send the seat allocation confirmation request to Admin. t36 ("Admin CONFIRMS seat allocation") is
+    // marked when Admin replies (admin_allocation), NOT here — so a persisted "request sent" flag stops
+    // the request being sent twice.
     employee.replyTimers = employee.replyTimers || {};
-    if (!isTaskDone(checklist, 't36')) {
-      markAndLog(employee, 't36');
+    employee._createdActions = employee._createdActions || {};
+    if (!isTaskDone(checklist, 't36') && !employee._createdActions.adminSeatRequest) {
+      employee._createdActions.adminSeatRequest = true;
       saveState(employee.employeeId, snapshotEmployee(employee));
       await sendAdminSeatAllocationRequest(employee).catch(err =>
         console.warn(`[Index] Admin seat allocation email failed for ${employee.name}: ${err.message}`)
@@ -1948,6 +1952,7 @@ async function handleReply(auth, classified, rawMsg) {
 
       if (!screenshot) {
         console.warn(`[Index] "Confirmed" reply for ${employee.name}'s HR induction had no screenshot attached — t34 stays pending until one is uploaded to HR_Induction_Screenshot`);
+        if (!isTaskDone(checklist, 't34')) await sendScreenshotNeeded(employee, 'induction').catch(err => console.warn(`[Index] Screenshot-needed email failed for ${employee.name}: ${err.message}`));
         break;
       }
       const file = await saveReplyAttachmentToDrive(auth, employee, rawMsg, screenshot, 'HR_Induction_Screenshot', screenshot.filename);
@@ -1978,6 +1983,7 @@ async function handleReply(auth, classified, rawMsg) {
 
       if (!screenshot) {
         console.warn(`[Index] "Confirmed" reply for ${employee.name}'s 25-day catchup had no screenshot attached — not marking t64 yet`);
+        if (!isTaskDone(checklist, 't64')) await sendScreenshotNeeded(employee, 'catchup25').catch(err => console.warn(`[Index] Screenshot-needed email failed for ${employee.name}: ${err.message}`));
         break;
       }
       const file = await saveReplyAttachmentToDrive(auth, employee, rawMsg, screenshot, config.catchupScreenshotSubfolder, screenshot.filename);
@@ -2044,6 +2050,8 @@ async function handleReply(auth, classified, rawMsg) {
       }
       if (!screenshot) {
         console.warn(`[Index] review_summary_shared reply for ${employee.name}'s ${dayMark}-day review had no screenshot attached — not marking done yet`);
+        const reviewTask = dayMark === 30 ? 't73' : dayMark === 60 ? 't76' : 't79';
+        if (!isTaskDone(checklist, reviewTask)) await sendScreenshotNeeded(employee, `review${dayMark}`).catch(err => console.warn(`[Index] Screenshot-needed email failed for ${employee.name}: ${err.message}`));
         break;
       }
       const file = await saveReplyAttachmentToDrive(auth, employee, rawMsg, screenshot, config.catchupScreenshotSubfolder, `${dayMark}day_${screenshot.filename}`);
@@ -2420,7 +2428,7 @@ async function onboardEmployee(auth, employee) {
   if (employee.replyTimerExpiry) {
     // Timer key → checklist task ID that marks the awaited reply as received.
     // If the task is already done, the reply was received and the timer is moot — skip it.
-    const TIMER_DONE_TASK = { hr: 't15', manager: 't19', it: 't20', itDoj: 't21', exitMail: 't58', induction: 't33', '30dayReview': 't44', '60dayNoReply': 't48', '90dayNoReply': 't51', probationNoReply: 't52' };
+    const TIMER_DONE_TASK = { hr: 't15', manager: 't19', it: 't20', itDoj: 't21', admin: 't36', exitMail: 't58', induction: 't33', '30dayReview': 't44', '60dayNoReply': 't48', '90dayNoReply': 't51', probationNoReply: 't52' };
     const now = Date.now();
     for (const [key, entry] of Object.entries(employee.replyTimerExpiry)) {
       const doneTask = TIMER_DONE_TASK[key];

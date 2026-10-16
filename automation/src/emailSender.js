@@ -311,6 +311,32 @@ async function sendMeetingScreenshotRejection(employee, meetingLabel, reason, wh
   });
 }
 
+// "Confirmed" arrived without a screenshot — tell the recruiter what is missing (instead of leaving the
+// step silently open). kind: 'induction' | 'catchup25' | 'review30' | 'review60' | 'review90'.
+// The subjects deliberately match the ones the reply classifier already keys on, so the recruiter's
+// reply to this email is routed to the right step.
+async function sendScreenshotNeeded(employee, kind) {
+  const { name, employeeId } = employee;
+  const co = esc(process.env.COMPANY_NAME || '');
+  const to = (employee.contacts && employee.contacts.recruiterEmail) || process.env.HR_EMAIL;
+  if (!to) return;
+  const review = /^review(\d+)$/.exec(kind);
+  const label = kind === 'induction' ? 'HR Induction' : kind === 'catchup25' ? '25th-Day Catchup' : `${review[1]}-Day Review`;
+  const subject = kind === 'induction' ? `HR Induction — Screenshot Needed — ${name} (${employeeId})`
+    : kind === 'catchup25' ? `25th Day Catchup Call — Screenshot Needed — ${name} (${employeeId})`
+    : `${review[1]}-Day Review Summary — Review Call Screenshot Needed — ${name} (${employeeId})`;
+  return sendEmail({
+    to,
+    subject,
+    html: `
+      <p>Hi,</p>
+      <p>We received your confirmation for the <strong>${esc(label)}</strong> meeting for <strong>${esc(name)}</strong> (${esc(employeeId)}), but <strong>no screenshot was attached</strong>.</p>
+      <p>Please reply to this email with <strong>"Confirmed"</strong> and a screenshot of the meeting attached (for example the video-call screen). The step stays pending until the screenshot is received.</p>
+      <p>Regards,<br/>${co} HR Automation</p>
+    `,
+  });
+}
+
 // Relieving-letter approval request — sent to HR when the joinee's relieving-letter upload
 // is not a verifiable relieving/experience letter (typically an exit email from the previous
 // employer). The joinee's file is attached; HR replies YES (sufficient) or NO. The reporting
@@ -1595,6 +1621,7 @@ module.exports = {
   sendDocumentRejection,
   sendExitMailApprovalRequest,
   sendMeetingScreenshotRejection,
+  sendScreenshotNeeded,
   sendDocumentReminder,
   sendPreOnboardingReminder,
   sendNoResponseAlert,
