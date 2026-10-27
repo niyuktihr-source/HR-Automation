@@ -248,6 +248,23 @@ function persistEmployeeToFile(data) {
   }
 }
 
+// Write just the official email into the employee's employees.json entry. Unlike persistEmployeeToFile it
+// leaves every other field alone (driveFolderId there is the shared root, not the joinee's folder), so a
+// restart — which rebuilds employees from this file — keeps the address IT confirmed.
+function persistOfficialEmailToFile(employeeId, officialEmail) {
+  try {
+    if (!officialEmail || !fs.existsSync(EMPLOYEES_FILE)) return;
+    const list = JSON.parse(fs.readFileSync(EMPLOYEES_FILE, 'utf8'));
+    const entry = list.find(e => e.employeeId === employeeId);
+    if (!entry || entry.officialEmail === officialEmail) return;
+    entry.officialEmail = officialEmail;
+    fs.writeFileSync(EMPLOYEES_FILE, JSON.stringify(list, null, 2));
+    console.log(`[Index] Official email saved to employees.json for ${employeeId}`);
+  } catch (err) {
+    console.error(`[Index] Failed to save official email for ${employeeId} to employees.json:`, err.message);
+  }
+}
+
 function loadEmployees() {
   const registryPath = EMPLOYEES_FILE;
   if (fs.existsSync(registryPath)) {
@@ -1680,7 +1697,8 @@ async function handleReply(auth, classified, rawMsg) {
       // (t21 not done means still pending; include t22 not done as a safety net for re-sends)
       it_allocation:              e => isTaskDone(e.checklist, 't20') && (!isTaskDone(e.checklist, 't21') || !isTaskDone(e.checklist, 't22')),
       manager_allocation:         e => isTaskDone(e.checklist, 't17') && !isTaskDone(e.checklist, 't18'),
-      official_email_created:     e => !isTaskDone(e.checklist, 't15'),
+      // Still open when t15 is done but no address was recorded (e.g. the greythr welcome arrived first)
+      official_email_created:     e => !isTaskDone(e.checklist, 't15') || !e.officialEmail,
       greythr_welcome:            e => isTaskDone(e.checklist, 't14') && !isTaskDone(e.checklist, 't16'),
       official_email_access_confirmed: e => isTaskDone(e.checklist, 't15') && !isTaskDone(e.checklist, 't16'),
       official_email_access_failed:    e => isTaskDone(e.checklist, 't15') && !isTaskDone(e.checklist, 't16'),
@@ -1772,12 +1790,15 @@ async function handleReply(auth, classified, rawMsg) {
     }
 
     case 'official_email_created':
-      if (isTaskDone(checklist, 't15')) {
-        console.log(`[Index] Skipping duplicate official_email_created for ${employee.name} — t15 already done`);
+      // Duplicate only if the address is already on record. t15 can be done without one (the greythr
+      // welcome marks it), and that must not make IT's reply with the actual address get dropped.
+      if (isTaskDone(checklist, 't15') && employee.officialEmail) {
+        console.log(`[Index] Skipping duplicate official_email_created for ${employee.name} — t15 already done and official email on record`);
         break;
       }
       if (data.officialEmail) {
         employee.officialEmail = data.officialEmail;
+        persistOfficialEmailToFile(employee.employeeId, data.officialEmail);
         markAndLog(employee, 't15');
         markAndLog(employee, 't16'); // auto-complete — no need to wait for joinee reply
         console.log(`[Index] Official email recorded: ${data.officialEmail}`);
@@ -3168,6 +3189,9 @@ async function main() {
       migrateChecklist(employee.checklist);
       if (saved && saved.formDocsReconciled) employee.formDocsReconciled = true;
       if (!employee.statusSheetId && saved && saved.statusSheetId) employee.statusSheetId = saved.statusSheetId;
+      // The official email is recorded from IT's reply and lives only in the state file (employees.json keeps
+      // the blank value from setup) — restore it, or the next state save overwrites it with ''.
+      if (!employee.officialEmail && saved && saved.officialEmail) employee.officialEmail = saved.officialEmail;
       if (!employee.projectIntroSheetId && saved && saved.projectIntroSheetId) employee.projectIntroSheetId = saved.projectIntroSheetId;
       if (!employee.employeeInfoSheetId && saved && saved.employeeInfoSheetId) employee.employeeInfoSheetId = saved.employeeInfoSheetId;
       if (!employee.catchupSheetId && saved && saved.catchupSheetId) employee.catchupSheetId = saved.catchupSheetId;

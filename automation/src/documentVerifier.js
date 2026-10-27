@@ -139,7 +139,7 @@ Only set valid=true if ALL four checks pass.`,
 }
 Only set valid=true if ALL four checks pass.`,
 
-  degreeCertificate: `You are verifying a graduation consolidated marksheet and/or degree certificate. Check ALL of the following and respond with a JSON object:
+  degreeCertificate: `You are verifying a graduation degree document. Any ONE of these is acceptable: a consolidated marksheet, a provisional or final degree certificate, or a set of semester-wise marksheets / grade cards. Check ALL of the following and respond with a JSON object:
 {
   "valid": true/false,
   "docType": "Degree Certificate",
@@ -149,10 +149,11 @@ Only set valid=true if ALL four checks pass.`,
     "degreeOrCourseNameVisible": true/false,
     "universityOrInstituteVisible": true/false
   },
+  "semestersSeen": "e.g. '1-8', '1-6 and 8', or '' if the document is not semester-wise",
   "failureReasons": ["list any failed checks in plain English"],
   "summary": "one sentence summary"
 }
-Only set valid=true if ALL four checks pass.`,
+Only set valid=true if ALL four checks pass. Do NOT fail the document for being semester-wise instead of consolidated, or for not showing every semester. If the document is semester-wise, list the semesters you can see in semestersSeen and end the summary with "Semesters seen: <list>." so HR can check completeness; if some semesters look missing, say so in the summary but keep valid=true.`,
 
   postgradCertificate: `You are verifying a post-graduation consolidated marksheet and/or degree certificate (Masters/MBA/MTech/PhD). Check ALL of the following and respond with a JSON object:
 {

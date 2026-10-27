@@ -10,6 +10,31 @@
 const config = require('./config');
 const { findLatestFormRow } = require('./formRowMatcher');
 
+const DEFAULT_RESPONSE_SHEET_IDS = {
+  fresher: '1PfoPQV_wghbxnzdUURD25pkvk6LeK8A52h42KkB4eSc',
+  experienced: '1a8Qpu6LRu6XFxFOW2QlXZefkJnas6NKT-gwuMwT-Dk8',
+};
+const RESPONSE_SHEET_ENV = {
+  fresher: 'PREONBOARDING_RESPONSES_FRESHER_ID',
+  experienced: 'PREONBOARDING_RESPONSES_EXPERIENCED_ID',
+};
+const warnedFallback = new Set();
+
+// Falls back to the built-in sheet ID when the env var is unset, and says so once per
+// process — if the form is ever re-linked to a new sheet, the engine would otherwise keep
+// reading the old one with no sign anything is wrong.
+function responseSheetId(employee) {
+  const kind = employee.isFresher ? 'fresher' : 'experienced';
+  const fromEnv = process.env[RESPONSE_SHEET_ENV[kind]];
+  if (fromEnv) return fromEnv;
+  const id = DEFAULT_RESPONSE_SHEET_IDS[kind];
+  if (!warnedFallback.has(kind)) {
+    warnedFallback.add(kind);
+    console.warn(`[Reconcile] ${RESPONSE_SHEET_ENV[kind]} is not set — using built-in ${kind} response sheet ${id}. If the ${kind} pre-onboarding form is linked to a different sheet, set this in .env.`);
+  }
+  return id;
+}
+
 async function fetchFormResponseRows(sheets, spreadsheetId) {
   const meta = await sheets.spreadsheets.get({ spreadsheetId, fields: 'sheets.properties' });
   const tab = meta.data.sheets[0].properties.title;
@@ -35,9 +60,7 @@ async function reconcileFormDocuments(auth, employee, formRowCache, deps) {
   const sheets = google.sheets({ version: 'v4', auth });
   const drive = google.drive({ version: 'v3', auth });
 
-  const spreadsheetId = employee.isFresher
-    ? (process.env.PREONBOARDING_RESPONSES_FRESHER_ID || '1PfoPQV_wghbxnzdUURD25pkvk6LeK8A52h42KkB4eSc')
-    : (process.env.PREONBOARDING_RESPONSES_EXPERIENCED_ID || '1a8Qpu6LRu6XFxFOW2QlXZefkJnas6NKT-gwuMwT-Dk8');
+  const spreadsheetId = responseSheetId(employee);
 
   let recovered = false;
   try {
@@ -100,9 +123,9 @@ async function reconcileFormDocuments(auth, employee, formRowCache, deps) {
       saveState(employee.employeeId, snapshotEmployee(employee));
     }
   } catch (err) {
-    console.warn(`[Reconcile] Form document reconciliation failed for ${employee.name}: ${err.message}`);
+    console.warn(`[Reconcile] Form document reconciliation failed for ${employee.name} (response sheet ${spreadsheetId}): ${err.message}`);
   }
   return recovered;
 }
 
-module.exports = { fetchFormResponseRows, reconcileFormDocuments };
+module.exports = { fetchFormResponseRows, reconcileFormDocuments, responseSheetId };
