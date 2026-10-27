@@ -18,7 +18,6 @@ const {
   sendVerificationReport,
   sendInductionCalendarInvite,
   sendProjectIntroInvite,
-  sendCatchupXLSEmail,
   sendReviewSummaryRequest,
   sendNoReplyEscalation,
 } = require('./emailSender');
@@ -72,7 +71,6 @@ const tests = [
     })],
   ['13/17sendInductionCalendarInvite',   () => sendInductionCalendarInvite(employee)],
   ['14/17sendProjectIntroInvite',        () => sendProjectIntroInvite(employee)],
-  ['15/17sendCatchupXLSEmail',           () => sendCatchupXLSEmail(employee)],
   ['16/17sendReviewSummaryRequest(30)',  () => sendReviewSummaryRequest(employee, 30)],
   ['17/17sendNoReplyEscalation',         () => sendNoReplyEscalation(employee, 'IT Team', process.env.IT_EMAIL || testEmail)],
 ];

@@ -721,63 +721,6 @@ async function resolveCatchupSheetUrl(employee) {
   return null;
 }
 
-// Template 16: 30-day catchup tracker — creates a Google Sheet in Drive + emails link to recruiter + manager (t40)
-async function sendCatchupXLSEmail(employee) {
-  const { name, employeeId, contacts, driveFolderId } = employee;
-  const recruiterEmail = contacts && contacts.recruiterEmail;
-  const managerEmail = contacts && contacts.managerEmail;
-  const toEmail = [recruiterEmail, managerEmail].filter(Boolean).join(', ');
-
-  // Look up or create the personalized catchup sheet
-  let sheetUrl = await resolveCatchupSheetUrl(employee);
-
-  // Fallback to project intro sheet if catchup sheet is not available
-  if (!sheetUrl && employee.projectIntroSheetId) {
-    sheetUrl = `https://docs.google.com/spreadsheets/d/${employee.projectIntroSheetId}`;
-  }
-
-  // Fallback: look it up by name in Drive if not stored on employee object
-  if (!sheetUrl && employee._auth && driveFolderId) {
-    try {
-      const { google } = require('googleapis');
-      const drive = google.drive({ version: 'v3', auth: employee._auth });
-      const res = await drive.files.list({
-        q: `'${driveFolderId}' in parents and (name contains 'Catchup' or name contains 'AL_DI_HR_019' or name contains 'Tracker') and trashed=false`,
-        fields: 'files(id)',
-      });
-      if (res.data.files.length > 0) {
-        sheetUrl = `https://docs.google.com/spreadsheets/d/${res.data.files[0].id}`;
-      }
-    } catch (err) {
-      console.warn(`[Email] Could not look up catchup tracker sheet for ${name}: ${err.message}`);
-    }
-  }
-
-  const sheetSection = sheetUrl
-    ? `<p style="margin:16px 0;"><a href="${sheetUrl}" style="background:#1a73e8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-weight:bold;">Open Catchup Tracker Sheet</a></p>
-       <p style="color:#555;font-size:13px;">The tracker has been saved in ${esc(name)}'s onboarding folder. Please fill in the monthly tracking tabs after each review call.</p>`
-    : `<p style="color:#e65100;">The tracker sheet could not be created automatically — please create it manually.</p>`;
-
-  // Send to recruiter + manager
-  await sendEmail({
-    to: toEmail,
-    subject: `Catchup Call & Task Tracker — ${esc(name)} (${esc(employeeId)})`,
-    html: `
-      <p>Hi,</p>
-      <p>Please find the Catchup Call & Task Tracker for <strong>${esc(name)}</strong> (ID: ${esc(employeeId)}) below.</p>
-      <p>The tracker contains:</p>
-      <ul>
-        <li><strong>Details of New Joinee & Task</strong> — Employee info, Key Areas of Responsibilities, Objectives, Task/Training Schedule</li>
-        <li><strong>Tracking - Month -1/2/3</strong> — Monthly performance tracking with tasks, lead observations, and recruiter feedback sections</li>
-      </ul>
-      ${sheetSection}
-      <p>Please fill in the relevant month tab after each catchup call (30-day, 60-day, and 90-day reviews).</p>
-      <p>Regards,<br/>${esc(process.env.COMPANY_NAME || '')} HR</p>
-    `,
-  });
-
-}
-
 // Template 17: 30/60/90-day review email — single email with tracking sheet link
 async function sendReviewSummaryRequest(employee, dayMark, calendarLinks = {}) {
   const { name, employeeId, contacts } = employee;
@@ -1643,7 +1586,6 @@ module.exports = {
   sendVerificationReport,
   sendInductionCalendarInvite,
   sendProjectIntroInvite,
-  sendCatchupXLSEmail,
   sendReviewSummaryRequest,
   sendNoReplyEscalation,
   sendOnboardingCompletionReport,

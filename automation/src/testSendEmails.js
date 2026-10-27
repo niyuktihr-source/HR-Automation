@@ -21,7 +21,6 @@ const {
   sendHRInductionConfirmation,
   sendInductionCalendarInvite,
   sendProjectIntroInvite,
-  sendCatchupXLSEmail,
   send25DayCatchupEmail,
   sendReviewSummaryRequest,
   sendPreProbationReminder,

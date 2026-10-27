@@ -23,7 +23,6 @@ const {
   sendVerificationReport,
   sendInductionCalendarInvite,
   sendProjectIntroInvite,
-  sendCatchupXLSEmail,
   sendReviewSummaryRequest,
   sendAdminSeatAllocationRequest,
   send25DayCatchupEmail,
@@ -76,7 +75,6 @@ const {
   renameStatusSheet,
   createProjectIntroSheet,
   createEmployeeInfoSheet,
-  getOrCreateCatchupSheet,
   reviewSheetSections,
 } = require('./statusTracker');
 const { updateMasterDashboard } = require('./masterDashboard');
@@ -402,7 +400,6 @@ function buildDefaultChecklist() {
         t37: { label: 'Project intro meeting attendance confirmed', done: false },
         t54: { label: 'Recruiter checks asset and seat allocation physically', done: false },
         t39: { label: '30-day catchup call scheduled', done: false },
-        t40: { label: 'Catchup XLS created, shared with recruiter, saved in joinee folder', done: false },
         t41: { label: '30/60/90-day project reviews scheduled with manager and recruiter', done: false },
         t42: { label: 'Checklist1 updated — DOJ phase complete', done: false },
       },
@@ -524,7 +521,9 @@ async function sendReviewSummaryAfterConfirm(auth, employee, dayMark, opts = {})
 }
 
 // Also drops retired tasks so a stale pending entry can't block isPhaseComplete.
-const RETIRED_TASKS = ['t38']; // t38: day-25 feedback form email — replaced by the day-23 survey (t70/t71)
+// t38: day-25 feedback form email — replaced by the day-23 survey (t70/t71)
+// t40: "catchup tracker" email at joining — not in HR's 30/60/90 spec (the tracking sheet link comes with the review invites)
+const RETIRED_TASKS = ['t38', 't40'];
 function migrateChecklist(checklist) {
   // A joinee who already got the old day-25 feedback form (t38) has had their survey —
   // without this, restore would send the day-23 survey to them straight away.
@@ -1315,17 +1314,6 @@ async function triggerNextStep(auth, employee, docType) {
       await uploadChecklist(auth, employee.driveFolderId, checklist);
       await markOnboardingComplete(auth, employee).catch(() => {});
       saveState(employee.employeeId, snapshotEmployee(employee));
-    }
-
-    // t40: Send catchup XLS tracker email to recruiter + manager
-    if (!isTaskDone(checklist, 't40')) {
-      markAndLog(employee, 't40');
-      saveState(employee.employeeId, snapshotEmployee(employee));
-      await getOrCreateCatchupSheet(auth, employee).catch(err =>
-        console.warn(`[Index] Catchup sheet creation failed for ${employee.name}: ${err.message}`)
-      );
-      await sendCatchupXLSEmail(employee);
-      await uploadChecklist(auth, employee.driveFolderId, checklist);
     }
 
     // Send the seat allocation confirmation request to Admin. t36 ("Admin CONFIRMS seat allocation") is
