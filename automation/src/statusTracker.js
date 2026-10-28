@@ -1164,7 +1164,6 @@ async function createEmployeeInfoSheet(auth, employee) {
           ['AL/DI/HR/018', '', 'Date: 17.06.2025', '', 'Rev No:', '1.1', 'Date:', '17/06/2025'],
           ['Revision Number', 'Date', 'Page Number/ Section', 'Description of Changes', 'Basis for Change', 'Author / Prepared by', 'Reviewed By', 'Approved by'],
           ['1.0', '20-June-2024', 'All', 'First Draft', 'Internal quality audit', 'Divya Rodrigues', 'Rubina Mallick', 'Gagan Mittal'],
-          ['1.1', '17- June-2025', 'Personal Details', 'Personal Details- Nominee details for Group Insurance', 'Internal review', 'Rubina Mallick', 'Divya Rodrigues', 'Gagan Mittal'],
         ],
       },
     }), 'docVersionHistory:values');
